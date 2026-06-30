@@ -208,3 +208,108 @@ First scan results after running Trivy and Checkov:
 **Week 2 scanning pipeline complete!**
 
 ---
+
+## Day 1 (continued) - Week 3: Observability
+
+### Goals
+- Deploy Prometheus + Grafana via Helm
+- Build findings Grafana dashboard
+- Deploy Vault for secrets management
+- Wire up OPA policy evaluation
+
+### Progress
+
+#### Prometheus + Grafana Stack
+- Deployed kube-prometheus-stack via Helm chart in Argo CD
+- Includes: Prometheus, Grafana, Node Exporter, kube-state-metrics
+- PostgreSQL datasource configured for findings queries
+- Pushgateway enabled for scanner job metrics
+- **Access:** http://localhost:3000 (admin/pipelineguard)
+
+#### Grafana Dashboard Created
+Custom "PipelineGuard - Security Findings" dashboard with:
+- Stat panels: Critical, High, Medium counts
+- Pie charts: Findings by Severity, by Scanner
+- Table: Recent Critical & High findings
+- Bar chart: Open findings by repository
+
+#### Vault Deployed
+- HashiCorp Vault in dev mode for local development
+- Root token: `root`
+- Secrets initialized:
+  - `secret/pipelineguard/database` - PostgreSQL credentials
+  - `secret/pipelineguard/github` - GitHub token placeholder
+  - `secret/pipelineguard/slack` - Slack webhook placeholder
+  - `secret/pipelineguard/webhook` - HMAC secret for webhook validation
+
+#### OPA Policy Engine
+- Open Policy Agent deployed with Rego policy
+- Policy evaluates findings and generates alerts
+- Test result for critical finding:
+```json
+{
+  "result": {
+    "alert": true,
+    "allow": false,
+    "violation": ["[CRITICAL] CVE-2024-1234 in pipelineguard-app - libssl"]
+  }
+}
+```
+
+### Issues & Solutions
+
+#### Issue 2: OPA Rego syntax changes
+**Problem:** Newer OPA versions require `if` keyword before rule bodies and `contains` for partial set rules.
+
+**Solution:** Updated Rego policy to v1 syntax:
+```rego
+import rego.v1
+allow if { ... }
+violation contains msg if { ... }
+```
+
+#### Issue 3: OPA loading duplicate policies
+**Problem:** ConfigMap mounting created symlinks that OPA loaded multiple times.
+
+**Solution:** Used `subPath` to mount only the specific policy file:
+```yaml
+volumeMounts:
+- name: policy
+  mountPath: /policies/policy.rego
+  subPath: policy.rego
+```
+
+### Argo CD Applications (Updated)
+
+| App | Namespace | Status |
+|-----|-----------|--------|
+| hello-world | default | Healthy |
+| postgresql | pipelineguard | Healthy |
+| scanners | pipelineguard | Healthy |
+| normalizer | pipelineguard | Healthy |
+| kube-prometheus-stack | monitoring | Healthy |
+| vault | vault | Healthy |
+| opa | pipelineguard | Healthy |
+
+### Access URLs
+
+| Service | URL | Credentials |
+|---------|-----|-------------|
+| Argo CD | https://localhost:8080 | admin / 36om2Hf2viTKW3lb |
+| Grafana | http://localhost:3000 | admin / pipelineguard |
+| Vault | http://localhost:8200 | token: root |
+
+---
+
+## Week 3 Progress Summary
+
+| Task | Status |
+|------|--------|
+| Deploy Prometheus + Grafana via Helm | Done |
+| Build findings Grafana dashboard | Done |
+| Deploy Vault | Done |
+| Wire up OPA policy evaluation | Done |
+
+**Week 3 observability complete!**
+
+---
