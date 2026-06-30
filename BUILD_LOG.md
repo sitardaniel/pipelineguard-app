@@ -47,3 +47,72 @@ kubectl apply -n argocd -f <manifest-url> --server-side=true --force-conflicts
 ```
 
 ---
+
+### Terraform & Terragrunt Setup
+
+#### Tools Installed
+- Terraform v1.15.5 - already installed
+- Terragrunt v1.0.8 - installed via Homebrew
+
+#### Modules Created (in pipelineguard-infra)
+
+| Module | Purpose |
+|--------|---------|
+| `modules/vpc` | VPC with public/private subnets, NAT gateway, route tables |
+| `modules/eks` | EKS cluster, managed node group, IRSA (IAM Roles for Service Accounts) |
+| `modules/rds` | PostgreSQL RDS instance with security groups |
+| `modules/ecr` | ECR repositories for scanner container images |
+| `modules/s3` | S3 bucket for Terraform state + DynamoDB lock table |
+
+#### Terragrunt Configuration
+
+```
+pipelineguard-infra/
+├── terragrunt.hcl              # Root config (remote state, provider)
+├── environments/
+│   ├── dev/
+│   │   ├── vpc/terragrunt.hcl
+│   │   ├── eks/terragrunt.hcl
+│   │   ├── rds/terragrunt.hcl
+│   │   └── ecr/terragrunt.hcl
+│   └── prod/
+│       ├── vpc/terragrunt.hcl
+│       ├── eks/terragrunt.hcl
+│       ├── rds/terragrunt.hcl
+│       └── ecr/terragrunt.hcl
+└── modules/
+    ├── vpc/
+    ├── eks/
+    ├── rds/
+    ├── ecr/
+    └── s3/
+```
+
+#### Environment Differences
+
+| Setting | Dev | Prod |
+|---------|-----|------|
+| EKS nodes | t3.medium SPOT | t3.large ON_DEMAND |
+| Node count | 2 (1-4) | 3 (2-6) |
+| RDS instance | db.t3.micro | db.t3.small |
+| RDS Multi-AZ | No | Yes |
+| VPC CIDR | 10.0.0.0/16 | 10.1.0.0/16 |
+
+#### Validation
+All 5 Terraform modules validated successfully with `terraform validate`.
+
+---
+
+## Week 1 Progress Summary
+
+| Task | Status |
+|------|--------|
+| Set up kind cluster locally | Done |
+| Install Argo CD and connect to gitops repo | Done |
+| Deploy hello-world app via GitOps | Done |
+| Write Terraform module for EKS | Done |
+| Configure Terragrunt root with S3 backend | Done |
+
+**Week 1 complete!**
+
+---
