@@ -116,3 +116,95 @@ All 5 Terraform modules validated successfully with `terraform validate`.
 **Week 1 complete!**
 
 ---
+
+## Day 1 (continued) - Week 2: Scanning Pipeline
+
+### Goals
+- Build scanner Job manifests (Trivy, Checkov, Gitleaks, Grype)
+- Deploy PostgreSQL for storing findings
+- Write result normalizer service
+- Test the complete scan pipeline
+
+### Progress
+
+#### PostgreSQL Deployed
+- Deployed via Argo CD as GitOps application
+- Schema includes `findings` table with indexes
+- Views for `critical_findings` and `findings_summary`
+
+#### Scanner CronJobs Created
+
+| Scanner | Purpose | Schedule |
+|---------|---------|----------|
+| Trivy | Container/IaC vulnerabilities | Every 6 hours |
+| Checkov | Terraform misconfigurations | Every 6 hours (+15m) |
+| Gitleaks | Secret detection in git history | Every 6 hours (+30m) |
+| Grype | Dependency vulnerabilities | Every 6 hours (+45m) |
+
+Each scanner:
+- Uses init container to clone repos
+- Outputs JSON results to shared PVC
+- Runs as Kubernetes CronJob
+
+#### Result Normalizer Service
+- Python service watching `/results` directory
+- Normalizes output from all 4 scanners to common schema
+- Inserts findings into PostgreSQL
+- Built as container, loaded into kind cluster
+
+#### Test Results
+
+First scan results after running Trivy and Checkov:
+
+```
+ scanner | severity | count
+---------+----------+-------
+ checkov | MEDIUM   |    32
+ trivy   | CRITICAL |     4
+ trivy   | HIGH     |     3
+ trivy   | MEDIUM   |     6
+```
+
+**45 total findings detected!**
+
+### Argo CD Applications
+
+| App | Path | Status |
+|-----|------|--------|
+| hello-world | apps/hello-world | Healthy |
+| postgresql | apps/postgresql | Healthy |
+| scanners | apps/scanners | Healthy |
+| normalizer | apps/normalizer | Healthy |
+
+### Files Created
+
+**pipelineguard-app:**
+- `src/normalizer/normalizer.py` - Main normalizer logic
+- `src/normalizer/requirements.txt` - Python dependencies
+- `src/normalizer/Dockerfile` - Container build
+
+**pipelineguard-gitops:**
+- `apps/postgresql/deployment.yaml` - PostgreSQL + PVC
+- `apps/postgresql/init-schema.yaml` - Schema init Job
+- `apps/scanners/config.yaml` - Scanner config + shared PVC
+- `apps/scanners/trivy-job.yaml` - Trivy CronJob
+- `apps/scanners/checkov-job.yaml` - Checkov CronJob
+- `apps/scanners/gitleaks-job.yaml` - Gitleaks CronJob
+- `apps/scanners/grype-job.yaml` - Grype CronJob
+- `apps/normalizer/deployment.yaml` - Normalizer Deployment
+
+---
+
+## Week 2 Progress Summary
+
+| Task | Status |
+|------|--------|
+| Build Trivy scanner Job | Done |
+| Add Checkov, Gitleaks, Grype Jobs | Done |
+| Write result normalizer service | Done |
+| Deploy PostgreSQL in cluster | Done |
+| Verify findings written to DB | Done (45 findings) |
+
+**Week 2 scanning pipeline complete!**
+
+---
