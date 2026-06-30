@@ -1,0 +1,67 @@
+# Environment & secrets — NEVER commit these
+.env
+.env.*
+*.env
+!.env.example
+secrets/
+*.secret
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+venv/
+.venv/
+env/
+pip-log.txt
+pip-delete-this-directory.txt
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+vendor/
+
+# Docker
+.dockerignore
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Scanner outputs — local only, never commit raw results
+scan-results/
+*.sarif
+*.json.bak
+trivy-report*
+checkov-report*
+gitleaks-report*
+grype-report*
+
+# Local kind / kubeconfig
+kubeconfig
+*.kubeconfig
