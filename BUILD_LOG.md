@@ -313,3 +313,136 @@ volumeMounts:
 **Week 3 observability complete!**
 
 ---
+
+## Day 1 (continued) - Week 4: Polish & Integration
+
+### Goals
+- Add GitHub webhook receiver service
+- Set up Slack alerting for critical findings
+- Update README with architecture diagram
+- Document the complete setup
+
+### Progress
+
+#### Webhook Receiver Service
+Created Python service that:
+- Listens for GitHub webhook events
+- Validates HMAC signatures
+- Creates Kubernetes Jobs from scanner CronJobs on push to main/master
+- RBAC configured for job creation permissions
+
+#### Slack Alerter Service
+Created Python service that:
+- Polls PostgreSQL for new critical/high findings
+- Integrates with OPA for policy-based alert decisions
+- Sends formatted Slack messages with finding details
+- Configurable severity thresholds
+
+#### Services Built and Deployed
+```bash
+# Images built and loaded into kind
+pipelineguard/webhook-receiver:latest
+pipelineguard/slack-alerter:latest
+```
+
+### Files Created
+
+**pipelineguard-app/src/webhook-receiver:**
+- `main.py` - Webhook handler with HMAC validation
+- `requirements.txt` - kubernetes client
+- `Dockerfile`
+
+**pipelineguard-app/src/slack-alerter:**
+- `alerter.py` - Slack notification logic with OPA integration
+- `requirements.txt` - psycopg2-binary
+- `Dockerfile`
+
+**pipelineguard-gitops:**
+- `apps/webhook-receiver/deployment.yaml` - Deployment, Service, RBAC, Secret
+- `apps/slack-alerter/deployment.yaml` - Deployment, Secret
+
+### Final Argo CD Applications
+
+| App | Namespace | Status |
+|-----|-----------|--------|
+| hello-world | default | Healthy |
+| postgresql | pipelineguard | Healthy |
+| scanners | pipelineguard | Healthy |
+| normalizer | pipelineguard | Healthy |
+| kube-prometheus-stack | monitoring | Healthy |
+| vault | vault | Healthy |
+| opa | pipelineguard | Healthy |
+| webhook-receiver | pipelineguard | Healthy |
+| slack-alerter | pipelineguard | Healthy |
+
+### Running Pods
+
+```
+NAME                                 READY   STATUS
+opa-66f9db8888-dmtdw                 1/1     Running
+postgresql-5585f77cbc-mtl9h          1/1     Running
+result-normalizer-57dbfdb75c-ffqvv   1/1     Running
+slack-alerter-6c87d54fc5-xwdrd       1/1     Running
+webhook-receiver-dd8459c4d-l6qgp     1/1     Running
+```
+
+---
+
+## Week 4 Progress Summary
+
+| Task | Status |
+|------|--------|
+| Add GitHub webhook receiver | Done |
+| Set up Slack alerting | Done |
+| Update README with architecture | Done |
+| Document complete setup | Done |
+
+**Week 4 polish complete!**
+
+---
+
+## Project Complete - Summary
+
+### What We Built (in one day!)
+
+1. **Week 1 - Foundation**
+   - Kind cluster with Argo CD
+   - Terraform modules for AWS (VPC, EKS, RDS, ECR, S3)
+   - Terragrunt configuration for dev/prod environments
+
+2. **Week 2 - Scanning Pipeline**
+   - 4 scanner CronJobs (Trivy, Checkov, Gitleaks, Grype)
+   - Result normalizer service
+   - PostgreSQL with findings schema
+   - **45 findings detected in first scan!**
+
+3. **Week 3 - Observability**
+   - Prometheus + Grafana stack
+   - Custom security findings dashboard
+   - HashiCorp Vault for secrets
+   - OPA for policy-as-code
+
+4. **Week 4 - Integration**
+   - GitHub webhook receiver
+   - Slack alerter with OPA integration
+   - Complete documentation
+
+### Technologies Used
+
+| Category | Tools |
+|----------|-------|
+| Container Orchestration | Kubernetes (kind), Argo CD |
+| Infrastructure as Code | Terraform, Terragrunt |
+| Security Scanning | Trivy, Checkov, Gitleaks, Grype |
+| Observability | Prometheus, Grafana |
+| Policy | Open Policy Agent (OPA) |
+| Secrets | HashiCorp Vault |
+| Database | PostgreSQL |
+
+### Repository Links
+
+- **App:** https://github.com/sitardaniel/pipelineguard-app
+- **GitOps:** https://github.com/sitardaniel/pipelineguard-gitops
+- **Infra:** https://github.com/sitardaniel/pipelineguard-infra
+
+---
