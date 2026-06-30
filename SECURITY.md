@@ -34,13 +34,13 @@ You can expect:
 
 PipelineGuard is built with the following security practices:
 
-- **No secrets in Git** — All credentials are managed by HashiCorp Vault
-- **Least privilege** — Kubernetes service accounts are scoped per component
-- **Private by default** — Repos are private until explicitly made public
-- **Secrets scanning enabled** — GitHub secret scanning and push protection are active on all repos
-- **Dependabot alerts enabled** — Automated dependency vulnerability alerts
-- **Branch protection** — `main` requires PR review; direct pushes are blocked
-- **Image scanning** — All container images are scanned by Trivy before deployment
+- **No secrets in Git** - All credentials are managed by HashiCorp Vault
+- **Least privilege** - Kubernetes service accounts are scoped per component
+- **Private by default** - Repos are private until explicitly made public
+- **Secrets scanning enabled** - GitHub secret scanning and push protection are active on all repos
+- **Dependabot alerts enabled** - Automated dependency vulnerability alerts
+- **Branch protection** - `main` requires PR review; direct pushes are blocked
+- **Image scanning** - All container images are scanned by Trivy before deployment
 
 ---
 
@@ -55,5 +55,5 @@ This security policy applies to:
 
 ## Out of Scope
 
-- Vulnerabilities in upstream tools (Trivy, Checkov, Gitleaks, Grype) — please report those to their respective maintainers
-- Issues in third-party dependencies — report to the dependency maintainer; open a Dependabot PR here if a fix is available
+- Vulnerabilities in upstream tools (Trivy, Checkov, Gitleaks, Grype) - please report those to their respective maintainers
+- Issues in third-party dependencies - report to the dependency maintainer; open a Dependabot PR here if a fix is available

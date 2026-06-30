@@ -1,4 +1,4 @@
-# Environment & secrets — NEVER commit these
+# Environment & secrets - NEVER commit these
 .env
 .env.*
 *.env
@@ -53,7 +53,7 @@ vendor/
 .DS_Store
 Thumbs.db
 
-# Scanner outputs — local only, never commit raw results
+# Scanner outputs - local only, never commit raw results
 scan-results/
 *.sarif
 *.json.bak

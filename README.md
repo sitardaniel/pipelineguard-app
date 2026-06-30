@@ -1,4 +1,4 @@
-# 🛡️ PipelineGuard — App
+# 🛡️ PipelineGuard - App
 
 > Automated security scanning platform for GitHub repositories. Runs parallel vulnerability scans on every push and surfaces findings in a centralized dashboard.
 
@@ -69,7 +69,7 @@ Scan Jobs   CronJob
 
 ---
 
-## Local Development (Phase 1 — kind cluster)
+## Local Development (Phase 1 - kind cluster)
 
 ### Prerequisites
 
