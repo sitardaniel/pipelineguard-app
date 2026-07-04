@@ -446,3 +446,46 @@ webhook-receiver-dd8459c4d-l6qgp     1/1     Running
 - **Infra:** https://github.com/sitardaniel/pipelineguard-infra
 
 ---
+
+## Day 2 - July 5, 2026
+
+### Goals
+- Add UI for selecting which GitHub repos to scan
+
+### Progress
+
+#### Config UI Service
+Created web UI that allows users to:
+- Browse all GitHub repos for a user
+- Search/filter repos by name or description
+- Select which repos to include in scans
+- Save selection to Kubernetes ConfigMap
+
+#### Technical Details
+- Python HTTP server with embedded HTML/CSS/JS
+- Fetches repos from GitHub API (supports pagination)
+- Updates `scanner-config` ConfigMap when saved
+- RBAC configured for ConfigMap access
+- Exposed via NodePort on port 30090
+
+#### Files Created
+
+**pipelineguard-app/src/config-ui:**
+- `app.py` - Web server with GitHub API integration
+- `requirements.txt` - kubernetes client
+- `Dockerfile`
+
+**pipelineguard-gitops:**
+- `apps/config-ui/deployment.yaml` - Deployment, Service, RBAC, Secret
+- `argocd-apps/config-ui.yaml` - Argo CD Application
+
+### Access URLs (Updated)
+
+| Service | URL | Credentials |
+|---------|-----|-------------|
+| Argo CD | https://localhost:8080 | admin / 36om2Hf2viTKW3lb |
+| Grafana | http://localhost:3000 | admin / pipelineguard |
+| Vault | http://localhost:8200 | token: root |
+| Config UI | http://localhost:30090 | - |
+
+---
