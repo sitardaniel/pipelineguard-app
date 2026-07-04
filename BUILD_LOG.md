@@ -31,7 +31,7 @@ A daily progress journal documenting the build process, issues encountered, and 
 - Kubernetes version: v1.35.0
 - Context: `kind-pipelineguard`
 - Argo CD UI: https://localhost:8080
-- Argo CD admin password: `36om2Hf2viTKW3lb`
+- Argo CD admin password: retrieve with `kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d`
 
 ### Issues & Solutions
 
@@ -295,7 +295,7 @@ volumeMounts:
 
 | Service | URL | Credentials |
 |---------|-----|-------------|
-| Argo CD | https://localhost:8080 | admin / 36om2Hf2viTKW3lb |
+| Argo CD | https://localhost:8080 | admin / (see `kubectl -n argocd get secret argocd-initial-admin-secret`) |
 | Grafana | http://localhost:3000 | admin / pipelineguard |
 | Vault | http://localhost:8200 | token: root |
 
@@ -483,9 +483,39 @@ Created web UI that allows users to:
 
 | Service | URL | Credentials |
 |---------|-----|-------------|
-| Argo CD | https://localhost:8080 | admin / 36om2Hf2viTKW3lb |
+| Argo CD | https://localhost:8080 | admin / (see `kubectl -n argocd get secret argocd-initial-admin-secret`) |
 | Grafana | http://localhost:3000 | admin / pipelineguard |
 | Vault | http://localhost:8200 | token: root |
 | Config UI | http://localhost:30090 | - |
+
+---
+
+## Day 5 - July 5, 2026: Grype Fix & IaC Security Hardening
+
+### Issues & Solutions
+
+#### Issue 4: Grype scanner crash-looping on every run
+**Problem:** `grype-scanner` CronJob hit `RunContainerError` / `BackoffLimitExceeded` on every execution. `anchore/grype:latest` is a distroless image with no shell, so the manifest's `sh -c "..."` command could never start.
+
+**Solution:** Switched to the `anchore/grype:debug` tag (ships a busybox shell) and called the binary via its full path `/grype`, since it isn't on `$PATH` even in the debug image.
+
+#### Issue 5: 4 Critical findings in pipelineguard-infra (Trivy IaC scan)
+**Problem:** Trivy's IaC scan flagged `modules/eks/main.tf` and `modules/rds/main.tf`:
+- `AWS-0104` (x2): security groups allowed unrestricted egress (`0.0.0.0/0`, all ports)
+- `AWS-0040` / `AWS-0041`: EKS cluster public endpoint open with no CIDR restriction
+
+**Solution:** Scoped both security groups' egress to the VPC CIDR instead of `0.0.0.0/0`, and defaulted the EKS public endpoint to disabled (`endpoint_public_access = false`), with an explicit CIDR allowlist variable to opt back in per environment.
+
+### Findings Snapshot (Postgres)
+
+```
+ scanner  | severity | count
+----------+----------+-------
+ checkov  | MEDIUM   |   320
+ gitleaks | HIGH     |     9
+ trivy    | CRITICAL |     4
+ trivy    | HIGH     |     3
+ trivy    | MEDIUM   |     6
+```
 
 ---
