@@ -506,6 +506,11 @@ Created web UI that allows users to:
 
 **Solution:** Scoped both security groups' egress to the VPC CIDR instead of `0.0.0.0/0`, and defaulted the EKS public endpoint to disabled (`endpoint_public_access = false`), with an explicit CIDR allowlist variable to opt back in per environment.
 
+#### Issue 6: Argo CD admin password committed in plaintext (public repo)
+**Problem:** This build log had the real local Argo CD admin password checked in twice (Day 1 and Week 3 sections), in a public GitHub repo.
+
+**Solution:** Replaced both with the `kubectl -n argocd get secret argocd-initial-admin-secret` command to retrieve it on demand instead of storing the value. Left the password in old commit history as-is (low risk: this credential only guards a `localhost`-only Argo CD UI on a local kind cluster, not reachable outside the machine it runs on).
+
 ### Findings Snapshot (Postgres)
 
 ```
