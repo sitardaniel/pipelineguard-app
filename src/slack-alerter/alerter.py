@@ -43,6 +43,30 @@ OPA_URL = os.getenv('OPA_URL', 'http://opa:8181')
 POLL_INTERVAL = int(os.getenv('POLL_INTERVAL', '60'))
 ALERT_SEVERITIES = os.getenv('ALERT_SEVERITIES', 'CRITICAL,HIGH').split(',')
 
+# Notification toggle, editable live from config-ui
+NOTIFY_CONFIGMAP = os.getenv('NOTIFY_CONFIGMAP', 'scanner-config')
+NOTIFY_NAMESPACE = os.getenv('NOTIFY_NAMESPACE', 'pipelineguard')
+
+
+def is_slack_enabled() -> bool:
+    """Check the live ConfigMap for whether Slack alerts are enabled.
+
+    Falls back to True (legacy always-on behavior, gated only by whether
+    SLACK_WEBHOOK_URL is set) if the ConfigMap can't be reached - e.g. when
+    running outside the cluster.
+    """
+    try:
+        from kubernetes import client, config
+        try:
+            config.load_incluster_config()
+        except Exception:
+            config.load_kube_config()
+        v1 = client.CoreV1Api()
+        cm = v1.read_namespaced_config_map(NOTIFY_CONFIGMAP, NOTIFY_NAMESPACE)
+        return (cm.data or {}).get('NOTIFY_SLACK_ENABLED', 'true').lower() == 'true'
+    except Exception:
+        return True
+
 
 def get_db_connection():
     """Create database connection."""
@@ -242,7 +266,10 @@ def main():
                             logger.info(f"Policy violation: {msg}")
 
                 if alert_findings:
-                    send_slack_alert(alert_findings)
+                    if is_slack_enabled():
+                        send_slack_alert(alert_findings)
+                    else:
+                        logger.info("Slack alerts disabled via config-ui, skipping send")
 
             last_check = datetime.now()
 

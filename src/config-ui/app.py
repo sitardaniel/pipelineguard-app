@@ -7,6 +7,7 @@ Simple web interface to select GitHub repos for scanning.
 
 import json
 import os
+import re
 import urllib.request
 import urllib.error
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -16,6 +17,11 @@ GITHUB_USERNAME = os.getenv('GITHUB_USERNAME', 'sitardaniel')
 GITHUB_TOKEN = os.getenv('GITHUB_TOKEN', '')  # Optional, for private repos
 PORT = int(os.getenv('PORT', '8080'))
 CONFIG_FILE = os.getenv('CONFIG_FILE', '/config/repos.txt')
+NOTIFY_CONFIG_FILE = os.getenv('NOTIFY_CONFIG_FILE', '/config/notify.json')
+NOTIFY_CONFIGMAP = os.getenv('NOTIFY_CONFIGMAP', 'scanner-config')
+NOTIFY_NAMESPACE = os.getenv('NOTIFY_NAMESPACE', 'pipelineguard')
+
+EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
 
 def get_github_repos(username):
     """Fetch repos from GitHub API."""
@@ -58,6 +64,43 @@ def save_selected_repos(repos):
     with open(CONFIG_FILE, 'w') as f:
         for repo in repos:
             f.write(repo + '\n')
+
+def get_notify_settings():
+    """Read current notification settings, preferring the live ConfigMap."""
+    defaults = {'slack_enabled': True, 'email_enabled': False, 'email_to': []}
+    try:
+        from kubernetes import client, config
+        try:
+            config.load_incluster_config()
+        except Exception:
+            config.load_kube_config()
+        v1 = client.CoreV1Api()
+        cm = v1.read_namespaced_config_map(NOTIFY_CONFIGMAP, NOTIFY_NAMESPACE)
+        data = cm.data or {}
+        return {
+            'slack_enabled': data.get('NOTIFY_SLACK_ENABLED', 'true').lower() == 'true',
+            'email_enabled': data.get('NOTIFY_EMAIL_ENABLED', 'false').lower() == 'true',
+            'email_to': [a.strip() for a in data.get('NOTIFY_EMAIL_TO', '').split(',') if a.strip()],
+        }
+    except Exception as e:
+        print(f"Could not read notify settings from ConfigMap, trying local file: {e}")
+
+    try:
+        with open(NOTIFY_CONFIG_FILE, 'r') as f:
+            saved = json.load(f)
+            return {**defaults, **saved}
+    except FileNotFoundError:
+        return defaults
+
+def save_notify_settings(slack_enabled, email_enabled, email_to):
+    """Persist notification settings locally and update the ConfigMap."""
+    os.makedirs(os.path.dirname(NOTIFY_CONFIG_FILE), exist_ok=True)
+    with open(NOTIFY_CONFIG_FILE, 'w') as f:
+        json.dump({
+            'slack_enabled': slack_enabled,
+            'email_enabled': email_enabled,
+            'email_to': email_to,
+        }, f)
 
 HTML_TEMPLATE = '''<!DOCTYPE html>
 <html>
@@ -160,6 +203,41 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             align-items: center;
             margin-bottom: 20px;
         }
+        .notify-section {
+            background: #0f0f1a;
+            border-radius: 12px;
+            padding: 20px;
+            margin-top: 30px;
+        }
+        .notify-section h2 {
+            font-size: 1rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: #888;
+            margin-bottom: 16px;
+        }
+        .check-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 8px 0;
+            cursor: pointer;
+        }
+        .check-row input { width: 18px; height: 18px; cursor: pointer; }
+        .email-input {
+            width: 100%;
+            padding: 10px 14px;
+            font-size: 15px;
+            border: 2px solid #333;
+            border-radius: 8px;
+            background: #1a1a2e;
+            color: #fff;
+            margin-top: 8px;
+            display: none;
+        }
+        .email-input.visible { display: block; }
+        .email-input:focus { outline: none; border-color: #4a9eff; }
+        .email-hint { color: #666; font-size: 0.8rem; margin-top: 6px; }
     </style>
 </head>
 <body>
@@ -177,6 +255,20 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             <!-- Repos will be inserted here -->
         </div>
 
+        <div class="notify-section">
+            <h2>Notifications</h2>
+            <label class="check-row">
+                <input type="checkbox" id="slackEnabled" onchange="updateNotifyUI()">
+                Send alerts to Slack
+            </label>
+            <label class="check-row">
+                <input type="checkbox" id="emailEnabled" onchange="updateNotifyUI()">
+                Send alerts by email
+            </label>
+            <input type="text" class="email-input" id="emailTo" placeholder="you@example.com, teammate@example.com">
+            <div class="email-hint">Critical and high-severity findings only. Comma-separate multiple addresses.</div>
+        </div>
+
         <button class="btn" id="saveBtn" onclick="saveSelection()">Save Selection</button>
         <div class="status" id="status"></div>
     </div>
@@ -184,6 +276,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
     <script>
         const repos = REPOS_JSON;
         const selected = SELECTED_JSON;
+        const notifySettings = NOTIFY_JSON;
 
         function renderRepos(filter = '') {
             const list = document.getElementById('repoList');
@@ -234,21 +327,41 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             renderRepos(document.getElementById('search').value);
         }
 
+        function updateNotifyUI() {
+            const emailEnabled = document.getElementById('emailEnabled').checked;
+            document.getElementById('emailTo').classList.toggle('visible', emailEnabled);
+        }
+
+        function initNotifySettings() {
+            document.getElementById('slackEnabled').checked = notifySettings.slack_enabled;
+            document.getElementById('emailEnabled').checked = notifySettings.email_enabled;
+            document.getElementById('emailTo').value = notifySettings.email_to.join(', ');
+            updateNotifyUI();
+        }
+
         function saveSelection() {
             const btn = document.getElementById('saveBtn');
             const status = document.getElementById('status');
             btn.disabled = true;
             btn.textContent = 'Saving...';
 
+            const notify = {
+                slack_enabled: document.getElementById('slackEnabled').checked,
+                email_enabled: document.getElementById('emailEnabled').checked,
+                email_to: document.getElementById('emailTo').value.split(',').map(s => s.trim()).filter(Boolean)
+            };
+
             fetch('/save', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({repos: selected})
+                body: JSON.stringify({repos: selected, notify: notify})
             })
-            .then(r => r.json())
-            .then(data => {
-                status.className = 'status success';
-                status.textContent = 'Saved! Scanners will use these repos on next run.';
+            .then(r => r.json().then(data => ({ok: r.ok, data})))
+            .then(({ok, data}) => {
+                status.className = ok ? 'status success' : 'status error';
+                status.textContent = ok
+                    ? 'Saved! Scanners and alerters will use these settings on next run.'
+                    : 'Error: ' + data.error;
                 btn.textContent = 'Save Selection';
                 btn.disabled = false;
             })
@@ -261,6 +374,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         }
 
         renderRepos();
+        initNotifySettings();
     </script>
 </body>
 </html>
@@ -278,11 +392,14 @@ class ConfigUIHandler(BaseHTTPRequestHandler):
         # Fetch repos and render page
         repos = get_github_repos(GITHUB_USERNAME)
         selected = get_selected_repos()
+        notify = get_notify_settings()
 
         html = HTML_TEMPLATE.replace(
             'REPOS_JSON', json.dumps(repos)
         ).replace(
             'SELECTED_JSON', json.dumps(selected)
+        ).replace(
+            'NOTIFY_JSON', json.dumps(notify)
         )
 
         self.send_response(200)
@@ -297,11 +414,26 @@ class ConfigUIHandler(BaseHTTPRequestHandler):
             data = json.loads(body)
 
             repos = data.get('repos', [])
+            notify = data.get('notify', {})
+            slack_enabled = bool(notify.get('slack_enabled', False))
+            email_enabled = bool(notify.get('email_enabled', False))
+            email_to = [a.strip() for a in notify.get('email_to', []) if a.strip()]
+
+            if email_enabled:
+                invalid = [a for a in email_to if not EMAIL_RE.match(a)]
+                if not email_to:
+                    self.send_error_json(400, "Enable email alerts requires at least one email address.")
+                    return
+                if invalid:
+                    self.send_error_json(400, f"Invalid email address: {invalid[0]}")
+                    return
+
             save_selected_repos(repos)
+            save_notify_settings(slack_enabled, email_enabled, email_to)
 
             # Also update the Kubernetes ConfigMap if running in cluster
             try:
-                update_configmap(repos)
+                update_configmap(repos, slack_enabled, email_enabled, email_to)
             except Exception as e:
                 print(f"Could not update ConfigMap: {e}")
 
@@ -314,29 +446,37 @@ class ConfigUIHandler(BaseHTTPRequestHandler):
         self.send_response(404)
         self.end_headers()
 
+    def send_error_json(self, code, message):
+        self.send_response(code)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(json.dumps({'error': message}).encode())
+
     def log_message(self, format, *args):
         print(f"{self.address_string()} - {format % args}")
 
-def update_configmap(repos):
-    """Update Kubernetes ConfigMap with selected repos."""
+def update_configmap(repos, slack_enabled, email_enabled, email_to):
+    """Update Kubernetes ConfigMap with selected repos and notification settings."""
     try:
         from kubernetes import client, config
         try:
             config.load_incluster_config()
-        except:
+        except Exception:
             config.load_kube_config()
 
         v1 = client.CoreV1Api()
 
         # Get current ConfigMap
-        cm = v1.read_namespaced_config_map('scanner-config', 'pipelineguard')
+        cm = v1.read_namespaced_config_map(NOTIFY_CONFIGMAP, NOTIFY_NAMESPACE)
 
-        # Update TARGET_REPOS
         cm.data['TARGET_REPOS'] = '\n'.join(repos)
+        cm.data['NOTIFY_SLACK_ENABLED'] = 'true' if slack_enabled else 'false'
+        cm.data['NOTIFY_EMAIL_ENABLED'] = 'true' if email_enabled else 'false'
+        cm.data['NOTIFY_EMAIL_TO'] = ','.join(email_to)
 
         # Patch ConfigMap
-        v1.patch_namespaced_config_map('scanner-config', 'pipelineguard', cm)
-        print(f"Updated ConfigMap with {len(repos)} repos")
+        v1.patch_namespaced_config_map(NOTIFY_CONFIGMAP, NOTIFY_NAMESPACE, cm)
+        print(f"Updated ConfigMap with {len(repos)} repos, slack={slack_enabled}, email={email_enabled}")
     except ImportError:
         print("kubernetes package not installed, skipping ConfigMap update")
 
