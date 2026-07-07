@@ -574,39 +574,62 @@ Created web UI that allows users to:
 
 ---
 
-## Day 7 - July 7, 2026: Email Alerter Wired Into Config UI's Notify Toggle
+## Day 7 - July 7, 2026: Live Notification Toggle (Slack + Email) from Config UI
 
-### Problem
-`config-ui` has had `NOTIFY_EMAIL_ENABLED` / `NOTIFY_EMAIL_TO` fields (writing into the
-shared `scanner-config` ConfigMap) since Day 2, and `slack-alerter` already reads its
-own `NOTIFY_SLACK_ENABLED` flag from that same ConfigMap on every check. `email-alerter`
-was still ignoring both settings — it only ever used the static `ALERT_EMAIL_TO` env
-var and had no on/off switch, so it was out of parity with how Slack alerts are
-already toggled live from the UI.
+### Goal
+Day 6 gave `email-alerter` a hardcoded `ALERT_EMAIL_TO` and no way to turn it off
+short of deleting the Deployment. Fix that by letting both alert channels be
+switched on/off and re-addressed from `config-ui`, live, without a redeploy —
+spans both the `pipelineguard-app` and `pipelineguard-gitops` repos.
 
-### Solution
-Brought `email-alerter` in line with `slack-alerter`'s existing pattern:
+### Changes — `pipelineguard-app`
 
-- `alerter.py`: added `get_notify_settings()`, which reads `NOTIFY_EMAIL_ENABLED` and
-  `NOTIFY_EMAIL_TO` from the `scanner-config` ConfigMap (via the `kubernetes` client)
-  before each send. Falls back to `(True, ALERT_EMAIL_TO)` — the old static behavior —
-  if the ConfigMap can't be reached (e.g. running the script outside the cluster).
-  `send_email_alert()` now takes an explicit `recipients` list instead of reading the
-  `ALERT_EMAIL_TO` global directly, and the main loop skips sending (with a log line)
-  when the ConfigMap has the toggle switched off.
-- `requirements.txt`: added `kubernetes>=28.1.0` for the ConfigMap read.
-- `gitops/apps/email-alerter/deployment.yaml`: added a dedicated `email-alerter`
-  ServiceAccount + Role (`get` on `configmaps`) + RoleBinding, and pointed the
-  Deployment's pod spec at it via `serviceAccountName` — mirrors the RBAC
-  `slack-alerter` already has for the same ConfigMap read.
+**`src/config-ui/app.py`** — new "Notifications" section in the web UI:
+- Checkboxes for "Send alerts to Slack" / "Send alerts by email", plus a
+  comma-separated recipient list input (shown only when email is enabled).
+- `get_notify_settings()` reads current state from the `scanner-config` ConfigMap
+  (`NOTIFY_SLACK_ENABLED`, `NOTIFY_EMAIL_ENABLED`, `NOTIFY_EMAIL_TO`), falling back
+  to a local `/config/notify.json` file, then to defaults, if the ConfigMap can't
+  be reached.
+- `save_notify_settings()` persists the same to the local file; `update_configmap()`
+  was extended to also patch the three `NOTIFY_*` keys into `scanner-config`
+  alongside the existing `TARGET_REPOS` update.
+- Server-side validation on save: enabling email with an empty recipient list, or
+  with a malformed address, is rejected with a 400 instead of silently saved.
+
+**`src/slack-alerter/alerter.py`** — added `is_slack_enabled()`, mirroring the
+pattern from Day 6's `email-alerter`: reads `NOTIFY_SLACK_ENABLED` from
+`scanner-config` before each send, defaults to `True` (legacy always-on) if the
+ConfigMap can't be reached. `requirements.txt` gained `kubernetes>=28.1.0`.
+
+**`src/email-alerter/alerter.py`** (from Day 6) already had the equivalent
+`get_notify_settings()` for `NOTIFY_EMAIL_ENABLED`/`NOTIFY_EMAIL_TO` — no further
+app-side change needed here, it was just waiting on the UI and RBAC to catch up.
+
+### Changes — `pipelineguard-gitops`
+
+- **`apps/scanners/config.yaml`**: `scanner-config` ConfigMap gained the three
+  `NOTIFY_*` keys (`NOTIFY_SLACK_ENABLED: "true"`, `NOTIFY_EMAIL_ENABLED: "false"`,
+  `NOTIFY_EMAIL_TO: ""`) so they exist with sane defaults before anyone touches
+  the UI.
+- **`apps/slack-alerter/deployment.yaml`**: added a `slack-alerter` ServiceAccount
+  + Role (`get` on `configmaps`) + RoleBinding, and pointed the Deployment at it
+  via `serviceAccountName` — same shape as `email-alerter`'s RBAC from Day 6.
+- **`argocd-apps/email-alerter.yaml`** (new): registers `email-alerter` as an Argo
+  CD Application. Its manifests existed on disk since Day 6 but were never wired
+  into Argo CD, so nothing was actually deploying it — this is what makes it
+  actually run in-cluster.
 
 ### Follow-ups
-- The email-alerter side is done, but toggling `NOTIFY_EMAIL_ENABLED` still has to be
-  done by hand-editing the `scanner-config` ConfigMap for now — `config-ui`'s save
-  path (`update_configmap()` in `src/config-ui/app.py`) already writes this key, so no
-  further UI work should be needed, but it hasn't been re-verified end-to-end since
-  this change.
-- Apply the updated `gitops/apps/email-alerter/deployment.yaml` (Role/RoleBinding are
-  new — a plain rollout restart won't pick those up, they need `kubectl apply`).
+- `kubectl apply -f gitops/argocd-apps/email-alerter.yaml` still needs to be run
+  once to register the app in Argo CD; after that, sync is automatic (prune +
+  selfHeal).
+- The `slack-alerter` and `email-alerter` Deployments both changed
+  ServiceAccount/RBAC — a plain rollout restart isn't enough, Argo CD needs to
+  actually sync the updated manifests (or `kubectl apply` them by hand).
+- Still nothing sends real mail/Slack messages until SMTP credentials
+  (`email-alerter-secret`) and the Slack webhook (`slack-alerter-secret`) are
+  populated in-cluster — set those directly with `kubectl`, not by committing
+  values into the Secret manifests.
 
 ---
