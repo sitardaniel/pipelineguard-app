@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Security lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install bandit
+        run: pip install bandit
+
+      - name: Run bandit (Python security lint)
+        # -lll = report/fail only on HIGH severity. Existing services currently
+        # carry a handful of MEDIUM findings (urllib.request.urlopen audits,
+        # a 0.0.0.0 bind) that predate this gate; ratchet this down once those
+        # are triaged so the gate also catches new MEDIUM-severity issues.
+        run: bandit -r src -lll -f screen
+
+      - name: Run gitleaks (secret scan)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  notify-on-failure:
+    name: Email on issues
+    needs: test
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send failure email
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_HOST }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.SMTP_USER }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          from: ${{ secrets.ALERT_EMAIL_FROM }}
+          to: ${{ secrets.ALERT_EMAIL_TO }}
+          subject: "[PipelineGuard] CI found issues in ${{ github.repository }}"
+          body: |
+            The "Security lint" job failed for ${{ github.repository }}@${{ github.ref_name }}.
+
+            Commit: ${{ github.sha }}
+            Triggered by: ${{ github.actor }}
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

@@ -17,6 +17,7 @@ This is the **application layer** of PipelineGuard. It holds:
 - **Result Normalizer** - Converts scanner output to unified schema, stores in PostgreSQL
 - **Webhook Receiver** - Listens for GitHub push events, triggers scan jobs
 - **Slack Alerter** - Monitors for critical findings, sends Slack notifications
+- **Email Alerter** - Monitors for critical findings, sends email notifications
 - Dockerfiles for all components
 
 Related repos:
@@ -101,6 +102,7 @@ Related repos:
 | Result Normalizer | Watches scan output, normalizes to common schema, stores in PostgreSQL |
 | Webhook Receiver | Validates GitHub webhooks (HMAC), triggers scanner jobs on push |
 | Slack Alerter | Monitors for critical findings, sends formatted Slack alerts |
+| Email Alerter | Monitors for critical findings, sends formatted email alerts via SMTP |
 
 ### Storage & Observability
 
@@ -143,9 +145,11 @@ kubectl port-forward svc/argocd-server -n argocd 8080:443
 docker build -t pipelineguard/result-normalizer:latest src/normalizer/
 docker build -t pipelineguard/webhook-receiver:latest src/webhook-receiver/
 docker build -t pipelineguard/slack-alerter:latest src/slack-alerter/
+docker build -t pipelineguard/email-alerter:latest src/email-alerter/
 kind load docker-image pipelineguard/result-normalizer:latest --name pipelineguard
 kind load docker-image pipelineguard/webhook-receiver:latest --name pipelineguard
 kind load docker-image pipelineguard/slack-alerter:latest --name pipelineguard
+kind load docker-image pipelineguard/email-alerter:latest --name pipelineguard
 
 # 6. Deploy apps via Argo CD (see pipelineguard-gitops)
 ```
@@ -173,10 +177,16 @@ pipelineguard-app/
 │   │   ├── main.py
 │   │   ├── requirements.txt
 │   │   └── Dockerfile
-│   └── slack-alerter/      # Slack notification service
+│   ├── slack-alerter/      # Slack notification service
+│   │   ├── alerter.py
+│   │   ├── requirements.txt
+│   │   └── Dockerfile
+│   └── email-alerter/      # Email notification service
 │       ├── alerter.py
 │       ├── requirements.txt
 │       └── Dockerfile
+├── .github/workflows/
+│   └── ci.yml              # Security lint gate + email-on-failure
 ├── BUILD_LOG.md            # Daily build progress journal
 ├── SECURITY.md
 └── README.md

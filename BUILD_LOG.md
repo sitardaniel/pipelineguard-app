@@ -524,3 +524,89 @@ Created web UI that allows users to:
 ```
 
 ---
+
+## Day 6 - July 5, 2026: Email Alerting & CI Security Gate
+
+### Goals
+- Add an email notification path alongside the existing Slack alerts
+- Catch issues before merge (CI), not just every 6 hours via CronJobs
+
+### Progress
+
+#### Email Alerter Service
+- New service mirroring `slack-alerter`: polls Postgres for new findings across all
+  scanned repos, checks OPA policy, and emails an HTML summary via SMTP (Gmail,
+  using an App Password) instead of (or in addition to) Slack.
+- Deliberately a different cadence than the Slack alerter: instead of a 60s poll
+  that fires near-instantly, the email alerter checks once a day
+  (`CHECK_INTERVAL_SECONDS`, default `86400`) and sends a single daily digest of
+  whatever findings landed since the last check, across all scanned repos.
+- Configured entirely through env vars (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`,
+  `SMTP_PASSWORD`, `ALERT_EMAIL_FROM`, `ALERT_EMAIL_TO`) sourced from a new
+  `email-alerter-secret` Kubernetes Secret — no SMTP credentials committed.
+- Falls back to logging findings if SMTP isn't configured, same fallback behavior
+  as the Slack alerter when its webhook URL is unset.
+
+#### CI Security Gate
+- Added `.github/workflows/ci.yml` (this repo had no GitHub Actions workflow before).
+- `test` job runs `bandit` (Python security lint) and `gitleaks-action` (secret scan)
+  on every push/PR to `main`.
+- `notify-on-failure` job runs only if `test` fails and emails the repo/commit/run
+  link via `dawidd6/action-send-mail`, using `SMTP_*` and `ALERT_EMAIL_*` GitHub
+  Secrets (separate from the cluster's `email-alerter-secret` — CI runs outside
+  the cluster).
+
+#### Files Created
+
+**pipelineguard-app/src/email-alerter:**
+- `alerter.py`, `requirements.txt`, `Dockerfile`
+
+**pipelineguard-app/.github/workflows:**
+- `ci.yml`
+
+**pipelineguard-gitops:**
+- `apps/email-alerter/deployment.yaml` - Deployment + Secret
+
+### Follow-ups
+- Populate real Gmail App Password credentials in `email-alerter-secret` and the CI
+  repo secrets (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`,
+  `ALERT_EMAIL_FROM`, `ALERT_EMAIL_TO`) before either path will actually send mail.
+
+---
+
+## Day 7 - July 7, 2026: Email Alerter Wired Into Config UI's Notify Toggle
+
+### Problem
+`config-ui` has had `NOTIFY_EMAIL_ENABLED` / `NOTIFY_EMAIL_TO` fields (writing into the
+shared `scanner-config` ConfigMap) since Day 2, and `slack-alerter` already reads its
+own `NOTIFY_SLACK_ENABLED` flag from that same ConfigMap on every check. `email-alerter`
+was still ignoring both settings — it only ever used the static `ALERT_EMAIL_TO` env
+var and had no on/off switch, so it was out of parity with how Slack alerts are
+already toggled live from the UI.
+
+### Solution
+Brought `email-alerter` in line with `slack-alerter`'s existing pattern:
+
+- `alerter.py`: added `get_notify_settings()`, which reads `NOTIFY_EMAIL_ENABLED` and
+  `NOTIFY_EMAIL_TO` from the `scanner-config` ConfigMap (via the `kubernetes` client)
+  before each send. Falls back to `(True, ALERT_EMAIL_TO)` — the old static behavior —
+  if the ConfigMap can't be reached (e.g. running the script outside the cluster).
+  `send_email_alert()` now takes an explicit `recipients` list instead of reading the
+  `ALERT_EMAIL_TO` global directly, and the main loop skips sending (with a log line)
+  when the ConfigMap has the toggle switched off.
+- `requirements.txt`: added `kubernetes>=28.1.0` for the ConfigMap read.
+- `gitops/apps/email-alerter/deployment.yaml`: added a dedicated `email-alerter`
+  ServiceAccount + Role (`get` on `configmaps`) + RoleBinding, and pointed the
+  Deployment's pod spec at it via `serviceAccountName` — mirrors the RBAC
+  `slack-alerter` already has for the same ConfigMap read.
+
+### Follow-ups
+- The email-alerter side is done, but toggling `NOTIFY_EMAIL_ENABLED` still has to be
+  done by hand-editing the `scanner-config` ConfigMap for now — `config-ui`'s save
+  path (`update_configmap()` in `src/config-ui/app.py`) already writes this key, so no
+  further UI work should be needed, but it hasn't been re-verified end-to-end since
+  this change.
+- Apply the updated `gitops/apps/email-alerter/deployment.yaml` (Role/RoleBinding are
+  new — a plain rollout restart won't pick those up, they need `kubectl apply`).
+
+---
