@@ -35,14 +35,15 @@ DB_NAME = os.getenv('DB_NAME', 'pipelineguard')
 DB_USER = os.getenv('DB_USER', 'pipelineguard')
 DB_PASSWORD = os.getenv('DB_PASSWORD', 'localdevpassword')
 
-# SMTP configuration
+# SMTP configuration - one shared relay for everyone; only the recipient
+# and the findings content vary per user (asking each user to bring their
+# own Gmail App Password isn't realistic).
 SMTP_HOST = os.getenv('SMTP_HOST', '')
 SMTP_PORT = int(os.getenv('SMTP_PORT', '587'))
 SMTP_USER = os.getenv('SMTP_USER', '')
 SMTP_PASSWORD = os.getenv('SMTP_PASSWORD', '')
 SMTP_USE_TLS = os.getenv('SMTP_USE_TLS', 'true').lower() == 'true'
 ALERT_EMAIL_FROM = os.getenv('ALERT_EMAIL_FROM', 'pipelineguard@localhost')
-ALERT_EMAIL_TO = [addr.strip() for addr in os.getenv('ALERT_EMAIL_TO', '').split(',') if addr.strip()]
 
 # OPA configuration
 OPA_URL = os.getenv('OPA_URL', 'http://opa:8181')
@@ -53,32 +54,17 @@ OPA_URL = os.getenv('OPA_URL', 'http://opa:8181')
 CHECK_INTERVAL_SECONDS = int(os.getenv('CHECK_INTERVAL_SECONDS', str(24 * 3600)))
 ALERT_SEVERITIES = os.getenv('ALERT_SEVERITIES', 'CRITICAL,HIGH').split(',')
 
-# Notification settings, editable live from config-ui
-NOTIFY_CONFIGMAP = os.getenv('NOTIFY_CONFIGMAP', 'scanner-config')
-NOTIFY_NAMESPACE = os.getenv('NOTIFY_NAMESPACE', 'pipelineguard')
 
-
-def get_notify_settings():
-    """Check the live ConfigMap for email alert enablement and recipients.
-
-    Falls back to (True, ALERT_EMAIL_TO) if the ConfigMap can't be reached -
-    e.g. when running outside the cluster - which reproduces the old
-    behavior where sending was gated only by SMTP_HOST/ALERT_EMAIL_TO.
-    """
-    try:
-        from kubernetes import client, config
-        try:
-            config.load_incluster_config()
-        except Exception:
-            config.load_kube_config()
-        v1 = client.CoreV1Api()
-        cm = v1.read_namespaced_config_map(NOTIFY_CONFIGMAP, NOTIFY_NAMESPACE)
-        data = cm.data or {}
-        enabled = data.get('NOTIFY_EMAIL_ENABLED', 'false').lower() == 'true'
-        recipients = [a.strip() for a in data.get('NOTIFY_EMAIL_TO', '').split(',') if a.strip()]
-        return enabled, (recipients or ALERT_EMAIL_TO)
-    except Exception:
-        return True, ALERT_EMAIL_TO
+def get_notify_users(conn) -> list:
+    """Users with email alerts enabled and at least one recipient address."""
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("""
+            SELECT u.id, u.username, n.email_to
+            FROM user_notify_settings n JOIN users u ON u.id = n.user_id
+            WHERE n.email_enabled = true
+              AND n.email_to IS NOT NULL AND n.email_to != ''
+        """)
+        return cur.fetchall()
 
 SEVERITY_COLOR = {
     'CRITICAL': '#d1242f',
@@ -180,8 +166,8 @@ def send_email_alert(findings: list, recipients: list):
         logger.error(f"Failed to send email alert: {e}")
 
 
-def get_new_findings(conn, since: datetime) -> list:
-    """Get new findings since last check."""
+def get_new_findings(conn, since: datetime, owner_user_id) -> list:
+    """Get this user's new findings since their last check."""
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute("""
             SELECT id, repo, scanner, severity, cve_id, package,
@@ -191,6 +177,7 @@ def get_new_findings(conn, since: datetime) -> list:
             WHERE scanned_at > %s
               AND status = 'open'
               AND severity = ANY(%s)
+              AND owner_user_id = %s
             ORDER BY
                 CASE severity
                     WHEN 'CRITICAL' THEN 1
@@ -199,17 +186,16 @@ def get_new_findings(conn, since: datetime) -> list:
                     ELSE 4
                 END,
                 scanned_at DESC
-        """, (since, ALERT_SEVERITIES))
+        """, (since, ALERT_SEVERITIES, owner_user_id))
         return cur.fetchall()
 
 
 def main():
-    """Main alerting loop."""
+    """Main alerting loop - checks each opted-in user's findings and emails them their own digest."""
     logger.info("Starting PipelineGuard Email Alerter")
     logger.info(f"Monitoring severities: {ALERT_SEVERITIES}")
     logger.info(f"Check interval: {CHECK_INTERVAL_SECONDS}s (~{CHECK_INTERVAL_SECONDS / 3600:.1f}h)")
     logger.info(f"SMTP configured: {bool(SMTP_HOST)}")
-    logger.info(f"Alert recipients: {ALERT_EMAIL_TO or 'none configured'}")
     logger.info(f"OPA URL: {OPA_URL}")
 
     # Wait for database
@@ -226,36 +212,37 @@ def main():
         logger.error("Could not connect to database")
         sys.exit(1)
 
-    # Track last check time. Look back a full interval on the first run so
-    # the initial check covers a whole day (not just a few minutes).
-    last_check = datetime.now() - timedelta(seconds=CHECK_INTERVAL_SECONDS)
+    # Per-user last check time. Look back a full interval on each user's
+    # first check so it covers a whole day, not just a few minutes.
+    last_check = {}
 
     while True:
         try:
             conn = get_db_connection()
-            findings = get_new_findings(conn, last_check)
-            conn.close()
+            users = get_notify_users(conn)
 
-            if findings:
-                logger.info(f"Found {len(findings)} new findings to evaluate")
+            for user in users:
+                since = last_check.get(user['id'], datetime.now() - timedelta(seconds=CHECK_INTERVAL_SECONDS))
+                findings = get_new_findings(conn, since, user['id'])
 
-                # Check OPA policy for each finding
-                alert_findings = []
-                for finding in findings:
-                    policy_result = check_opa_policy(dict(finding))
-                    if policy_result.get('alert', False):
-                        alert_findings.append(finding)
-                        for msg in policy_result.get('violation', []):
-                            logger.info(f"Policy violation: {msg}")
+                if findings:
+                    logger.info(f"{user['username']}: found {len(findings)} new findings to evaluate")
 
-                if alert_findings:
-                    enabled, recipients = get_notify_settings()
-                    if enabled:
+                    alert_findings = []
+                    for finding in findings:
+                        policy_result = check_opa_policy(dict(finding))
+                        if policy_result.get('alert', False):
+                            alert_findings.append(finding)
+                            for msg in policy_result.get('violation', []):
+                                logger.info(f"Policy violation: {msg}")
+
+                    if alert_findings:
+                        recipients = [a.strip() for a in user['email_to'].split(',') if a.strip()]
                         send_email_alert(alert_findings, recipients)
-                    else:
-                        logger.info("Email alerts disabled via config-ui, skipping send")
 
-            last_check = datetime.now()
+                last_check[user['id']] = datetime.now()
+
+            conn.close()
 
         except Exception as e:
             logger.error(f"Error in alerting loop: {e}")

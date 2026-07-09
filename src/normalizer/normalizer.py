@@ -8,6 +8,7 @@ normalizes them to a common schema, and stores them in PostgreSQL.
 
 import json
 import os
+import re
 import sys
 import time
 import uuid
@@ -54,7 +55,7 @@ def get_db_connection():
 def normalize_trivy(data: dict, filename: str) -> list:
     """Normalize Trivy scan results."""
     findings = []
-    repo = extract_repo_from_filename(filename)
+    owner_username, repo = extract_repo_from_filename(filename)
 
     # Handle filesystem scan results
     results = data.get('Results', [])
@@ -65,6 +66,7 @@ def normalize_trivy(data: dict, filename: str) -> list:
         for vuln in vulns:
             findings.append({
                 'repo': repo,
+                'owner_username': owner_username,
                 'scanner': 'trivy',
                 'severity': vuln.get('Severity', 'UNKNOWN'),
                 'cve_id': vuln.get('VulnerabilityID'),
@@ -80,6 +82,7 @@ def normalize_trivy(data: dict, filename: str) -> list:
         for misconfig in misconfigs:
             findings.append({
                 'repo': repo,
+                'owner_username': owner_username,
                 'scanner': 'trivy',
                 'severity': misconfig.get('Severity', 'UNKNOWN'),
                 'cve_id': misconfig.get('ID'),
@@ -96,7 +99,7 @@ def normalize_trivy(data: dict, filename: str) -> list:
 def normalize_checkov(data: dict, filename: str) -> list:
     """Normalize Checkov scan results."""
     findings = []
-    repo = extract_repo_from_filename(filename)
+    owner_username, repo = extract_repo_from_filename(filename)
 
     # Handle different Checkov output formats
     checks = data if isinstance(data, list) else [data]
@@ -111,6 +114,7 @@ def normalize_checkov(data: dict, filename: str) -> list:
 
             findings.append({
                 'repo': repo,
+                'owner_username': owner_username,
                 'scanner': 'checkov',
                 'severity': severity.upper(),
                 'cve_id': check.get('check_id'),
@@ -127,7 +131,7 @@ def normalize_checkov(data: dict, filename: str) -> list:
 def normalize_gitleaks(data: list, filename: str) -> list:
     """Normalize Gitleaks scan results."""
     findings = []
-    repo = extract_repo_from_filename(filename)
+    owner_username, repo = extract_repo_from_filename(filename)
 
     if not isinstance(data, list):
         data = []
@@ -135,6 +139,7 @@ def normalize_gitleaks(data: list, filename: str) -> list:
     for leak in data:
         findings.append({
             'repo': repo,
+            'owner_username': owner_username,
             'scanner': 'gitleaks',
             'severity': 'HIGH',  # All secrets are high severity
             'cve_id': None,
@@ -151,7 +156,7 @@ def normalize_gitleaks(data: list, filename: str) -> list:
 def normalize_grype(data: dict, filename: str) -> list:
     """Normalize Grype scan results."""
     findings = []
-    repo = extract_repo_from_filename(filename)
+    owner_username, repo = extract_repo_from_filename(filename)
 
     matches = data.get('matches', [])
 
@@ -161,6 +166,7 @@ def normalize_grype(data: dict, filename: str) -> list:
 
         findings.append({
             'repo': repo,
+            'owner_username': owner_username,
             'scanner': 'grype',
             'severity': vuln.get('severity', 'UNKNOWN'),
             'cve_id': vuln.get('id'),
@@ -174,14 +180,36 @@ def normalize_grype(data: dict, filename: str) -> list:
     return findings
 
 
-def extract_repo_from_filename(filename: str) -> str:
-    """Extract repository name from scan result filename."""
-    # Filenames like: trivy-app-20260630-120000.json
-    basename = os.path.basename(filename)
-    parts = basename.split('-')
-    if len(parts) >= 2:
-        return f"pipelineguard-{parts[1]}"
-    return "unknown"
+_TIMESTAMP_SUFFIX_RE = re.compile(r'^(.*)-\d{8}-\d{6}$')
+_SCANNER_PREFIXES = ('trivy-', 'checkov-', 'gitleaks-', 'grype-')
+
+
+def extract_repo_from_filename(filename: str) -> tuple:
+    """Extract (owner_username, repo_name) from a scan result filename.
+
+    Filenames look like <scanner>-<clone_dir>-<YYYYMMDD>-<HHMMSS>.json,
+    where <clone_dir> is exactly what the git-clone init container named the
+    checkout: "<username>__<reponame>". Strip the known scanner prefix and
+    timestamp suffix rather than positionally split on "-", since repo names
+    themselves contain hyphens (a naive split previously mangled
+    "pipelineguard-app" into the repo name "pipelineguard").
+    """
+    stem = os.path.basename(filename)
+    if stem.endswith('.json'):
+        stem = stem[:-len('.json')]
+
+    for prefix in _SCANNER_PREFIXES:
+        if stem.startswith(prefix):
+            stem = stem[len(prefix):]
+            break
+
+    match = _TIMESTAMP_SUFFIX_RE.match(stem)
+    clone_dir_name = match.group(1) if match else stem
+
+    if '__' in clone_dir_name:
+        username, repo_name = clone_dir_name.split('__', 1)
+        return username, repo_name
+    return None, clone_dir_name or 'unknown'
 
 
 def process_file(filepath: str) -> list:
@@ -214,13 +242,22 @@ def process_file(filepath: str) -> list:
 
 
 def insert_findings(findings: list):
-    """Insert findings into PostgreSQL."""
+    """Insert findings into PostgreSQL, attributing each to its owning user."""
     if not findings:
         return
 
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
+            usernames = {f['owner_username'] for f in findings if f.get('owner_username')}
+            owner_ids = {}
+            if usernames:
+                cur.execute(
+                    "SELECT id, username FROM users WHERE username = ANY(%s)",
+                    (list(usernames),)
+                )
+                owner_ids = {username: user_id for user_id, username in cur.fetchall()}
+
             values = [
                 (
                     f['repo'],
@@ -232,6 +269,7 @@ def insert_findings(findings: list):
                     f['line_number'],
                     f['description'],
                     f['fix_version'],
+                    owner_ids.get(f.get('owner_username')),
                 )
                 for f in findings
             ]
@@ -241,7 +279,7 @@ def insert_findings(findings: list):
                 """
                 INSERT INTO findings
                     (repo, scanner, severity, cve_id, package, file_path,
-                     line_number, description, fix_version)
+                     line_number, description, fix_version, owner_user_id)
                 VALUES %s
                 """,
                 values

@@ -33,9 +33,6 @@ DB_NAME = os.getenv('DB_NAME', 'pipelineguard')
 DB_USER = os.getenv('DB_USER', 'pipelineguard')
 DB_PASSWORD = os.getenv('DB_PASSWORD', 'localdevpassword')
 
-# Slack configuration
-SLACK_WEBHOOK_URL = os.getenv('SLACK_WEBHOOK_URL', '')
-
 # OPA configuration
 OPA_URL = os.getenv('OPA_URL', 'http://opa:8181')
 
@@ -43,29 +40,17 @@ OPA_URL = os.getenv('OPA_URL', 'http://opa:8181')
 POLL_INTERVAL = int(os.getenv('POLL_INTERVAL', '60'))
 ALERT_SEVERITIES = os.getenv('ALERT_SEVERITIES', 'CRITICAL,HIGH').split(',')
 
-# Notification toggle, editable live from config-ui
-NOTIFY_CONFIGMAP = os.getenv('NOTIFY_CONFIGMAP', 'scanner-config')
-NOTIFY_NAMESPACE = os.getenv('NOTIFY_NAMESPACE', 'pipelineguard')
 
-
-def is_slack_enabled() -> bool:
-    """Check the live ConfigMap for whether Slack alerts are enabled.
-
-    Falls back to True (legacy always-on behavior, gated only by whether
-    SLACK_WEBHOOK_URL is set) if the ConfigMap can't be reached - e.g. when
-    running outside the cluster.
-    """
-    try:
-        from kubernetes import client, config
-        try:
-            config.load_incluster_config()
-        except Exception:
-            config.load_kube_config()
-        v1 = client.CoreV1Api()
-        cm = v1.read_namespaced_config_map(NOTIFY_CONFIGMAP, NOTIFY_NAMESPACE)
-        return (cm.data or {}).get('NOTIFY_SLACK_ENABLED', 'true').lower() == 'true'
-    except Exception:
-        return True
+def get_notify_users(conn) -> list:
+    """Users with Slack alerts enabled and a webhook configured."""
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("""
+            SELECT u.id, u.username, n.slack_webhook
+            FROM user_notify_settings n JOIN users u ON u.id = n.user_id
+            WHERE n.slack_enabled = true
+              AND n.slack_webhook IS NOT NULL AND n.slack_webhook != ''
+        """)
+        return cur.fetchall()
 
 
 def get_db_connection():
@@ -97,9 +82,9 @@ def check_opa_policy(finding: dict) -> dict:
         return {'alert': True}  # Default to alert if OPA is unavailable
 
 
-def send_slack_alert(findings: list):
-    """Send alert to Slack webhook."""
-    if not SLACK_WEBHOOK_URL:
+def send_slack_alert(findings: list, webhook_url: str):
+    """Send alert to a user's Slack webhook."""
+    if not webhook_url:
         logger.warning("No Slack webhook URL configured, logging alert instead")
         for f in findings:
             logger.info(f"ALERT: [{f['severity']}] {f['cve_id']} in {f['repo']} - {f['package']}")
@@ -187,7 +172,7 @@ def send_slack_alert(findings: list):
 
     try:
         req = urllib.request.Request(
-            SLACK_WEBHOOK_URL,
+            webhook_url,
             data=payload,
             headers={'Content-Type': 'application/json'},
             method='POST'
@@ -198,8 +183,8 @@ def send_slack_alert(findings: list):
         logger.error(f"Failed to send Slack alert: {e}")
 
 
-def get_new_findings(conn, since: datetime) -> list:
-    """Get new findings since last check."""
+def get_new_findings(conn, since: datetime, owner_user_id) -> list:
+    """Get this user's new findings since their last check."""
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute("""
             SELECT id, repo, scanner, severity, cve_id, package,
@@ -209,6 +194,7 @@ def get_new_findings(conn, since: datetime) -> list:
             WHERE scanned_at > %s
               AND status = 'open'
               AND severity = ANY(%s)
+              AND owner_user_id = %s
             ORDER BY
                 CASE severity
                     WHEN 'CRITICAL' THEN 1
@@ -217,16 +203,15 @@ def get_new_findings(conn, since: datetime) -> list:
                     ELSE 4
                 END,
                 scanned_at DESC
-        """, (since, ALERT_SEVERITIES))
+        """, (since, ALERT_SEVERITIES, owner_user_id))
         return cur.fetchall()
 
 
 def main():
-    """Main alerting loop."""
+    """Main alerting loop - checks each opted-in user's findings and sends to their own webhook."""
     logger.info("Starting PipelineGuard Slack Alerter")
     logger.info(f"Monitoring severities: {ALERT_SEVERITIES}")
     logger.info(f"Poll interval: {POLL_INTERVAL}s")
-    logger.info(f"Slack webhook configured: {bool(SLACK_WEBHOOK_URL)}")
     logger.info(f"OPA URL: {OPA_URL}")
 
     # Wait for database
@@ -243,35 +228,36 @@ def main():
         logger.error("Could not connect to database")
         sys.exit(1)
 
-    # Track last check time
-    last_check = datetime.now() - timedelta(minutes=5)
+    # Per-user last check time, so a newly opted-in user still gets a
+    # reasonable initial lookback instead of missing everything before now.
+    last_check = {}
 
     while True:
         try:
             conn = get_db_connection()
-            findings = get_new_findings(conn, last_check)
+            users = get_notify_users(conn)
+
+            for user in users:
+                since = last_check.get(user['id'], datetime.now() - timedelta(minutes=5))
+                findings = get_new_findings(conn, since, user['id'])
+
+                if findings:
+                    logger.info(f"{user['username']}: found {len(findings)} new findings to evaluate")
+
+                    alert_findings = []
+                    for finding in findings:
+                        policy_result = check_opa_policy(dict(finding))
+                        if policy_result.get('alert', False):
+                            alert_findings.append(finding)
+                            for msg in policy_result.get('violation', []):
+                                logger.info(f"Policy violation: {msg}")
+
+                    if alert_findings:
+                        send_slack_alert(alert_findings, user['slack_webhook'])
+
+                last_check[user['id']] = datetime.now()
+
             conn.close()
-
-            if findings:
-                logger.info(f"Found {len(findings)} new findings to evaluate")
-
-                # Check OPA policy for each finding
-                alert_findings = []
-                for finding in findings:
-                    policy_result = check_opa_policy(dict(finding))
-                    if policy_result.get('alert', False):
-                        alert_findings.append(finding)
-                        # Log any violation messages
-                        for msg in policy_result.get('violation', []):
-                            logger.info(f"Policy violation: {msg}")
-
-                if alert_findings:
-                    if is_slack_enabled():
-                        send_slack_alert(alert_findings)
-                    else:
-                        logger.info("Slack alerts disabled via config-ui, skipping send")
-
-            last_check = datetime.now()
 
         except Exception as e:
             logger.error(f"Error in alerting loop: {e}")
