@@ -739,12 +739,31 @@ self-heal - confirmed it correctly reset both back to git's empty placeholders,
 which also doubles as a live confirmation that self-heal itself works as
 intended.
 
+### A Second Real Bug, Found Swapping in the Real Slack Webhook
+Setting `slack-alerter-secret` to a real Slack Incoming Webhook (new
+`PipelineGuard` Slack app under the SDGOPS workspace) got silently wiped back
+to empty within seconds - Argo CD's `selfHeal` reverting it to git's empty
+placeholder, exactly as designed. This is a real, previously-undiscovered
+architectural bug affecting more than just this secret: `config-ui`'s
+`update_configmap()` patches `scanner-config` directly via the Kubernetes API
+and never touches git (confirmed by reading `app.py`), so every repo-selection
+or notification-toggle change made from the UI since Day 2/Day 7 has likely
+been getting silently reverted by the next Argo CD reconcile too.
+
+Fixed properly with `ignoreDifferences` on the `email-alerter`, `slack-alerter`,
+and `scanners` Applications (`argocd-apps/*.yaml`), scoped to just the specific
+Secret/ConfigMap's `/data` - manually- or UI-set values now persist, while
+Argo CD still manages and self-heals everything else about those apps normally.
+
+With that fixed, set the real Slack webhook again, triggered a fresh
+`gitleaks-scanner` run, and confirmed in the logs (`Slack alert sent for 1
+findings`) and by the repo owner directly in the `#new-channel` Slack channel -
+a real alert, in the real workspace, end to end.
+
 ### Follow-ups
-- Both alerters are now proven to work end-to-end - the only remaining step is
-  swapping the test SMTP/webhook values for the repo owner's real Gmail App
-  Password and Slack incoming webhook URL, set directly with `kubectl` (never
-  committed to git).
-- CI's `SMTP_*`/`ALERT_EMAIL_*` GitHub Actions secrets are still unset - same
-  real-credential dependency, needs the repo owner's own values.
+- Email is still on the Ethereal test SMTP account, not the repo owner's real
+  Gmail App Password - same `kubectl patch email-alerter-secret` swap as
+  Slack, now safe to do thanks to the `ignoreDifferences` fix.
+- CI's `SMTP_*`/`ALERT_EMAIL_*` GitHub Actions secrets are still unset.
 
 ---
