@@ -690,14 +690,61 @@ opposite problem in each direction:
   cluster (Postgres findings, Vault state, everything), which is a much
   bigger, more destructive action than the restart that was actually approved.
 
+### Resolution - Sidestepping the Docker Desktop Hang Entirely
+Rather than keep fighting the local daemon, added `.github/workflows/build-images.yml`
+to `pipelineguard-app`: builds all five service images (config-ui, email-alerter,
+result-normalizer, slack-alerter, webhook-receiver) in GitHub Actions and pushes
+them to `ghcr.io/sitardaniel/pipelineguard-*`, entirely bypassing the local
+machine. All five build and push successfully; confirmed each is publicly
+pullable via an anonymous GHCR token exchange (no visibility change needed -
+packages inherit public visibility from the public source repo). Repointed all
+five `gitops/apps/*/deployment.yaml` at the GHCR images instead of the
+local-only `pipelineguard/*:latest` refs, which is what was actually blocking
+email-alerter from ever running - nothing but one laptop's Docker cache could
+ever have pulled those. `email-alerter`'s pod pulled and reached `Running` in
+~15s once the fix synced.
+
+### Bug Found and Fixed While Verifying: OPA Check Crashed on Every Real Finding
+To confirm the fix actually worked rather than just checking pod status, did a
+real end-to-end test of both alerters using free, disposable services (not the
+repo owner's real accounts) rather than leaving them completely unverified:
+- Email: created a free Ethereal (`nodemailer`) test SMTP inbox via their public
+  API, temporarily set `email-alerter-secret` and `scanner-config`'s
+  `NOTIFY_EMAIL_ENABLED` to point at it (pausing Argo CD self-heal on the
+  `email-alerter`/`scanners` Applications first so it wouldn't revert them
+  mid-test), restarted the pod, and confirmed via IMAP that the alert email
+  genuinely arrived with the correct subject and findings.
+- Slack: created a temporary webhook.site endpoint, pointed `slack-alerter-secret`
+  at it, triggered a fresh `gitleaks-scanner` run (slack-alerter only looks back
+  5 minutes on startup, unlike email-alerter's 24h), and confirmed via
+  webhook.site's API that a correctly-formatted Slack Block Kit payload arrived.
+
+This first attempt surfaced a real bug: `check_opa_policy()` in both alerters
+passed the raw Postgres finding dict straight into `json.dumps()`, which threw
+`Object of type datetime is not JSON serializable` on the `scanned_at` field -
+on *every single finding*, always. The `except` block silently fell back to
+`alert=True` (fail-open), so this never crashed anything visibly and findings
+still got alerted on, but real OPA policy results were never actually being
+used - the whole policy evaluation step was a no-op dressed up as working.
+Fixed both call sites with `json.dumps({"input": finding}, default=str)`,
+pushed through the same GHCR pipeline, force-removed the stale `:latest` image
+from the kind node (`crictl rmi` - imagePullPolicy: IfNotPresent means a same-tag
+rollout restart alone reuses the cached old image), and re-ran both end-to-end
+tests: this time the logs show real policy violations being parsed
+(`Policy violation: [SECRET] Detected in ... at BUILD_LOG.md`) instead of the
+silent crash-and-fallback.
+
+Reverted the test SMTP/webhook values afterward by simply re-enabling Argo CD
+self-heal - confirmed it correctly reset both back to git's empty placeholders,
+which also doubles as a live confirmation that self-heal itself works as
+intended.
+
 ### Follow-ups
-- Check Docker Desktop's Settings -> Resources -> Proxies for a stale manual
-  proxy entry; once pulls work again, build and `kind load docker-image`
-  `pipelineguard/email-alerter:latest`.
-- Still nothing sends real mail/Slack messages until SMTP credentials
-  (`email-alerter-secret`) and the Slack webhook (`slack-alerter-secret`) are
-  populated with real values, and CI's `SMTP_*`/`ALERT_EMAIL_*` GitHub Actions
-  secrets are still unset - all three need real external credentials only the
-  repo owner can supply.
+- Both alerters are now proven to work end-to-end - the only remaining step is
+  swapping the test SMTP/webhook values for the repo owner's real Gmail App
+  Password and Slack incoming webhook URL, set directly with `kubectl` (never
+  committed to git).
+- CI's `SMTP_*`/`ALERT_EMAIL_*` GitHub Actions secrets are still unset - same
+  real-credential dependency, needs the repo owner's own values.
 
 ---
