@@ -1,0 +1,45 @@
+name: Build and Push Images
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - ".github/workflows/build-images.yml"
+  workflow_dispatch: {}
+
+jobs:
+  build-push:
+    name: Build ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        service:
+          - config-ui
+          - email-alerter
+          - normalizer
+          - slack-alerter
+          - webhook-receiver
+        include:
+          - service: normalizer
+            image_name: result-normalizer
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: src/${{ matrix.service }}
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/pipelineguard-${{ matrix.image_name || matrix.service }}:latest
