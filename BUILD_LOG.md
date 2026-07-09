@@ -633,3 +633,65 @@ app-side change needed here, it was just waiting on the UI and RBAC to catch up.
   values into the Secret manifests.
 
 ---
+
+## Day 8 - July 9, 2026: Close the Argo CD Registration Gap
+
+### Goal
+Audit the live cluster against `pipelineguard-gitops` and fix whatever GitOps
+principle ("everything Argo CD deploys lives in this repo") had quietly drifted.
+
+### Findings
+Cross-referencing `gitops/argocd-apps/` against `gitops/apps/*` turned up the
+opposite problem in each direction:
+- `postgresql`, `scanners`, `normalizer`, `opa`, `vault`, `monitoring`,
+  `webhook-receiver`, and `slack-alerter` were all running live in the cluster
+  as Argo CD `Application` objects, but none of those Applications were ever
+  committed to `argocd-apps/` - they'd been applied by hand at some point,
+  silently violating the repo's own "no manual kubectl apply" rule.
+- `config-ui` had an `Application` manifest committed to git, but no matching
+  `Application` object actually existed in-cluster - its pod was running from a
+  bare `kubectl apply` of the raw Deployment instead, untracked by Argo CD.
+- `email-alerter` had neither - exactly the Day 7 follow-up that was never
+  closed out.
+
+### Changes - `pipelineguard-gitops`
+- Added `argocd-apps/{postgresql,scanners,normalizer,opa,vault,monitoring,
+  webhook-receiver,slack-alerter}.yaml`, matching the specs already running
+  live, so a fresh cluster bootstrapped from this repo now actually deploys
+  everything instead of just `config-ui` and `email-alerter`.
+- Fixed `README.md`'s Repository Structure and Bootstrap sections, which still
+  described an old `manifests/`, `helm-values/`, `policies/` layout that no
+  longer exists, and pointed the bootstrap step at `argocd-apps/` instead of
+  `apps/`. Added the `kind-config.yaml` the bootstrap steps referenced but
+  never actually included.
+- Ran `kubectl apply -f argocd-apps/ -n argocd` against the live cluster:
+  `config-ui` and `email-alerter` Applications were created (closing the Day 7
+  follow-up), the rest reconciled cleanly since they matched what was already
+  running.
+
+### Verification
+- Manually triggered a one-off `grype-scanner` Job: completed cleanly, confirms
+  the Day 5 crash-loop fix is holding. Zero findings is a true negative for the
+  two small repos it scans, not a bug - `checkov` (528), `gitleaks` (21), and
+  `trivy` (13) all have real findings in Postgres.
+- `vault status`: initialized, unsealed, `vault-init-secrets` Job completed.
+- `opa` and `webhook-receiver`: both answering `/health` normally.
+- `email-alerter` is `Synced` in Argo CD but its pod is `ImagePullBackOff` -
+  `pipelineguard/email-alerter:latest` was never actually built. Attempting the
+  build hit a stuck local Docker Desktop proxy (`http.docker.internal:3128`
+  hangs resolving `python:3.11-slim`, even though direct network access from
+  the host works fine) - a local tooling issue, not a code issue. Left
+  unresolved rather than restarting Docker Desktop and risking the already-running
+  8-day-old cluster.
+
+### Follow-ups
+- Build and `kind load docker-image` `pipelineguard/email-alerter:latest` once
+  the local Docker Desktop networking issue clears (or after a Docker Desktop
+  restart).
+- Still nothing sends real mail/Slack messages until SMTP credentials
+  (`email-alerter-secret`) and the Slack webhook (`slack-alerter-secret`) are
+  populated with real values, and CI's `SMTP_*`/`ALERT_EMAIL_*` GitHub Actions
+  secrets are still unset - all three need real external credentials only the
+  repo owner can supply.
+
+---
