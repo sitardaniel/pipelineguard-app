@@ -760,10 +760,32 @@ With that fixed, set the real Slack webhook again, triggered a fresh
 findings`) and by the repo owner directly in the `#new-channel` Slack channel -
 a real alert, in the real workspace, end to end.
 
+### Real Gmail Credentials - Both Alerters Now Fully Live
+Swapped in the repo owner's real Gmail App Password (`sdgops.io@gmail.com`,
+2-Step Verification + App Passwords). First two attempts failed with Gmail's
+`535 5.7.8 Username and Password not accepted`: the first from a transposition
+typo introduced while stripping spaces from the password, the second because
+`smtp-user` was set to the wrong Google account (`sity143@gmail.com` instead of
+the one the App Password actually belongs to, `sdgops.io@gmail.com`). Fixed
+both; the third attempt sent successfully and the repo owner confirmed the
+email landed in their real inbox with the correct findings table.
+
+Also set all six CI secrets (`SMTP_HOST/PORT/USER/PASSWORD`,
+`ALERT_EMAIL_FROM/TO`) on `pipelineguard-app` via `gh secret set`, reusing the
+same verified-working Gmail credentials. Didn't force a CI failure just to
+exercise `notify-on-failure` - `ci.yml` has no manual dispatch trigger, and
+deliberately breaking a green build for a test wasn't worth it given the
+action uses the exact same host/user/password already proven to work moments
+earlier via `email-alerter`.
+
+One nice side effect: real end-to-end proof the whole pipeline works, not just
+notifications - the alert email itself contained a gitleaks finding in this
+very file, correctly identified as a false positive (a `kubectl ... | base64 -d`
+command from Day 1's instructions, not an actual embedded secret).
+
 ### Follow-ups
-- Email is still on the Ethereal test SMTP account, not the repo owner's real
-  Gmail App Password - same `kubectl patch email-alerter-secret` swap as
-  Slack, now safe to do thanks to the `ignoreDifferences` fix.
-- CI's `SMTP_*`/`ALERT_EMAIL_*` GitHub Actions secrets are still unset.
+- None outstanding. Both alerters are live with real production credentials,
+  end-to-end verified (Slack in `#new-channel`, email in the repo owner's real
+  inbox), and CI's mail secrets are set.
 
 ---
