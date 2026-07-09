@@ -82,7 +82,7 @@ def get_db_connection():
 def check_opa_policy(finding: dict) -> dict:
     """Check OPA policy for a finding."""
     try:
-        data = json.dumps({"input": finding}).encode()
+        data = json.dumps({"input": finding}, default=str).encode()
         req = urllib.request.Request(
             f"{OPA_URL}/v1/data/pipelineguard/policy",
             data=data,
