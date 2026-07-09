@@ -680,14 +680,20 @@ opposite problem in each direction:
   `pipelineguard/email-alerter:latest` was never actually built. Attempting the
   build hit a stuck local Docker Desktop proxy (`http.docker.internal:3128`
   hangs resolving `python:3.11-slim`, even though direct network access from
-  the host works fine) - a local tooling issue, not a code issue. Left
-  unresolved rather than restarting Docker Desktop and risking the already-running
-  8-day-old cluster.
+  the host works fine). Did a full Docker Desktop restart (approved, kind
+  cluster survived intact) - the hang persisted afterward on *any* image pull,
+  even a tiny `hello-world`, ruling out anything image-specific. Points at a
+  stuck Docker Desktop VM-internal proxy component rather than transient app
+  state; likely needs a look at Settings -> Resources -> Proxies in the Docker
+  Desktop GUI (not something scriptable from the CLI). Did not attempt a full
+  Docker Desktop data reset - that would very likely wipe the 8-day-old kind
+  cluster (Postgres findings, Vault state, everything), which is a much
+  bigger, more destructive action than the restart that was actually approved.
 
 ### Follow-ups
-- Build and `kind load docker-image` `pipelineguard/email-alerter:latest` once
-  the local Docker Desktop networking issue clears (or after a Docker Desktop
-  restart).
+- Check Docker Desktop's Settings -> Resources -> Proxies for a stale manual
+  proxy entry; once pulls work again, build and `kind load docker-image`
+  `pipelineguard/email-alerter:latest`.
 - Still nothing sends real mail/Slack messages until SMTP credentials
   (`email-alerter-secret`) and the Slack webhook (`slack-alerter-secret`) are
   populated with real values, and CI's `SMTP_*`/`ALERT_EMAIL_*` GitHub Actions
