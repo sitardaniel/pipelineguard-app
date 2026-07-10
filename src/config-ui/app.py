@@ -8,6 +8,7 @@ settings are isolated per user.
 """
 
 import json
+import mimetypes
 import os
 import re
 import secrets
@@ -20,6 +21,8 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
+
+STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
 
 # GitHub OAuth App credentials - see gitops/apps/config-ui/deployment.yaml
 GITHUB_OAUTH_CLIENT_ID = os.getenv('GITHUB_OAUTH_CLIENT_ID', '')
@@ -225,7 +228,7 @@ def get_notify_settings(user_id: str) -> dict:
         conn.close()
 
 
-def get_my_findings(user_id: str, limit: int = 100) -> list:
+def get_my_findings(user_id: str, limit: int = 1000) -> list:
     """The signed-in user's own open findings, most severe and most recent first."""
     conn = get_db_connection()
     try:
@@ -315,6 +318,7 @@ LOGIN_HTML = '''<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <title>PipelineGuard - Sign In</title>
+    <link rel="icon" type="image/png" href="/static/logo.png">
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -323,7 +327,8 @@ LOGIN_HTML = '''<!DOCTYPE html>
             align-items: center; justify-content: center;
         }
         .card { text-align: center; }
-        h1 { font-size: 2.2rem; margin-bottom: 10px; }
+        h1 { font-size: 2.2rem; margin-bottom: 10px; display: flex; align-items: center; justify-content: center; gap: 12px; }
+        .logo-icon { height: 1.2em; width: auto; vertical-align: middle; }
         p { color: #888; margin-bottom: 30px; }
         .btn {
             background: #24292e; color: #fff; border: none; padding: 14px 28px;
@@ -335,7 +340,7 @@ LOGIN_HTML = '''<!DOCTYPE html>
 </head>
 <body>
     <div class="card">
-        <h1>🛡️ PipelineGuard</h1>
+        <h1><img src="/static/logo.png" alt="" class="logo-icon"> PipelineGuard</h1>
         <p>Sign in to pick your own repos and see your own findings.</p>
         <a class="btn" href="/login">Sign in with GitHub</a>
     </div>
@@ -348,6 +353,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <title>PipelineGuard - Select Repos</title>
+    <link rel="icon" type="image/png" href="/static/logo.png">
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
@@ -372,6 +378,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             align-items: center;
             gap: 10px;
         }
+        .logo-icon { height: 1.1em; width: auto; vertical-align: middle; }
         .subtitle { color: #888; margin-bottom: 30px; }
         .search-box {
             width: 100%;
@@ -487,23 +494,139 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         .text-input.visible { display: block; }
         .text-input:focus { outline: none; border-color: #4a9eff; }
         .field-hint { color: #666; font-size: 0.8rem; margin-top: 6px; }
+
+        /* --- Open Issues dashboard ------------------------------------- */
+        :root {
+            --status-critical: #d03b3b;
+            --status-serious:  #ec835a;
+            --status-warning:  #fab219;
+            --status-good:     #0ca30c;
+            --series-blue:     #4a9eff;
+            --ink-primary:     #fff;
+            --ink-secondary:   #b0b0b8;
+            --ink-muted:       #888;
+        }
+
+        .stat-row {
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+            gap: 12px;
+            margin-bottom: 24px;
+        }
+        .stat-tile {
+            background: #0f0f1a;
+            border-radius: 10px;
+            padding: 14px 16px;
+            border-left: 3px solid var(--tile-accent, #333);
+        }
+        .stat-tile .stat-label {
+            color: var(--ink-secondary);
+            font-size: 0.78rem;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        .stat-tile .stat-value {
+            color: var(--ink-primary);
+            font-size: 1.9rem;
+            font-weight: 700;
+            margin-top: 4px;
+        }
+
+        .chart-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+        .chart-card {
+            background: #0f0f1a;
+            border-radius: 12px;
+            padding: 18px 20px;
+        }
+        .chart-card h3 {
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--ink-muted);
+            margin-bottom: 14px;
+            font-weight: 600;
+        }
+        .bar-row { display: flex; align-items: center; gap: 10px; padding: 5px 0; }
+        .bar-row .bar-label {
+            width: 108px; flex: 0 0 auto; font-size: 0.82rem; color: var(--ink-secondary);
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        .bar-track {
+            flex: 1 1 auto; height: 20px; border-radius: 4px;
+            background: rgba(255,255,255,0.06); position: relative; cursor: default;
+        }
+        .bar-fill {
+            height: 100%; border-radius: 4px; min-width: 4px;
+            transition: filter 0.15s;
+        }
+        .bar-row:hover .bar-fill, .bar-row:focus-within .bar-fill { filter: brightness(1.2); }
+        .bar-value {
+            width: 34px; flex: 0 0 auto; text-align: right;
+            font-variant-numeric: tabular-nums; font-weight: 600; color: var(--ink-primary);
+            font-size: 0.85rem;
+        }
+        .chart-empty { color: var(--ink-muted); font-size: 0.85rem; padding: 10px 0; }
+
+        .chart-tooltip {
+            position: fixed; pointer-events: none; z-index: 50;
+            background: #1a1a2e; border: 1px solid #333; border-radius: 6px;
+            padding: 6px 10px; font-size: 0.8rem; color: var(--ink-primary);
+            display: none; box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+        }
+        .chart-tooltip .tt-value { font-weight: 700; }
+        .chart-tooltip .tt-label { color: var(--ink-secondary); margin-left: 4px; }
+
+        .issues-filter-row {
+            display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+            margin-bottom: 16px;
+        }
+        .sev-chip {
+            border: 1px solid #333; background: transparent; border-radius: 20px;
+            padding: 5px 14px; font-size: 0.8rem; font-weight: 600; cursor: pointer;
+            color: var(--ink-secondary); display: flex; align-items: center; gap: 6px;
+        }
+        .sev-chip .dot { width: 8px; height: 8px; border-radius: 50%; }
+        .sev-chip.active { color: #fff; border-color: currentColor; background: rgba(255,255,255,0.06); }
+        .issues-search {
+            flex: 1 1 200px; min-width: 160px; padding: 8px 12px; font-size: 0.85rem;
+            border: 2px solid #333; border-radius: 8px; background: #1a1a2e; color: #fff;
+        }
+        .issues-search:focus { outline: none; border-color: #4a9eff; }
+        .issues-count { color: var(--ink-muted); font-size: 0.8rem; margin-bottom: 10px; }
+
         .findings-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; table-layout: fixed; }
         .findings-table th, .findings-table td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #222; }
-        .findings-table th { color: #888; font-weight: 600; text-transform: uppercase; font-size: 0.75rem; }
+        .findings-table th {
+            color: #888; font-weight: 600; text-transform: uppercase; font-size: 0.75rem;
+            cursor: pointer; user-select: none; white-space: nowrap;
+        }
+        .findings-table th:hover { color: #ccc; }
+        .findings-table th .sort-arrow { opacity: 0.5; margin-left: 3px; }
+        .findings-table th.sorted .sort-arrow { opacity: 1; }
         .findings-table td.finding-desc {
             color: #aaa; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
         }
-        .sev-CRITICAL { color: #ff4d4d; }
-        .sev-HIGH { color: #ff9f4d; }
-        .sev-MEDIUM { color: #ffd24d; }
-        .sev-LOW { color: #999; }
-        .empty-note { color: #666; font-size: 0.9rem; }
+        .sev-CRITICAL { color: var(--status-critical); }
+        .sev-HIGH { color: var(--status-serious); }
+        .sev-MEDIUM { color: var(--status-warning); }
+        .sev-LOW { color: var(--status-good); }
+        .empty-note { color: #666; font-size: 0.9rem; padding: 16px 0; }
+
+        @media (max-width: 700px) {
+            .stat-row { grid-template-columns: repeat(2, 1fr); }
+            .chart-row { grid-template-columns: 1fr; }
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="top-bar">
-            <h1>PipelineGuard</h1>
+            <h1><img src="/static/logo.png" alt="" class="logo-icon"> PipelineGuard</h1>
             <div class="user-badge">
                 <img src="USER_AVATAR" alt="">
                 <span>USER_NAME</span>
@@ -538,9 +661,30 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         </div>
 
         <div class="findings-section">
-            <h2>My Findings</h2>
+            <h2>Open Issues</h2>
+
+            <div class="stat-row" id="statRow"></div>
+
+            <div class="chart-row">
+                <div class="chart-card">
+                    <h3>By severity</h3>
+                    <div id="severityChart"></div>
+                </div>
+                <div class="chart-card">
+                    <h3>By repository</h3>
+                    <div id="repoChart"></div>
+                </div>
+            </div>
+
+            <div class="issues-filter-row" id="sevFilterRow"></div>
+            <input type="text" class="issues-search" id="issuesSearch"
+                   placeholder="Search repo, package, CVE, description..." oninput="renderIssues()">
+
+            <div class="issues-count" id="issuesCount"></div>
             <div id="findingsBody"></div>
         </div>
+
+        <div class="chart-tooltip" id="chartTooltip"></div>
 
         <button class="btn" id="saveBtn" onclick="saveSelection()">Save Selection</button>
         <div class="status" id="status"></div>
@@ -620,27 +764,203 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             return div.innerHTML;
         }
 
-        function renderFindings() {
-            const body = document.getElementById('findingsBody');
-            if (!findings.length) {
-                body.innerHTML = '<div class="empty-note">No open findings for your repos yet.</div>';
+        // --- Open Issues dashboard -------------------------------------------
+
+        const SEVERITY_ORDER = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'];
+        const SEVERITY_COLOR = {
+            CRITICAL: 'var(--status-critical)',
+            HIGH: 'var(--status-serious)',
+            MEDIUM: 'var(--status-warning)',
+            LOW: 'var(--status-good)',
+        };
+        const SEVERITY_RANK = {CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3};
+
+        const issuesFilter = {
+            severities: new Set(SEVERITY_ORDER),
+        };
+        const issuesSort = {column: 'severity', dir: 'asc'};
+
+        function getFilteredFindings() {
+            const q = document.getElementById('issuesSearch').value.trim().toLowerCase();
+            return findings.filter(f => {
+                if (!issuesFilter.severities.has(f.severity)) return false;
+                if (!q) return true;
+                const haystack = [f.repo, f.package, f.cve_id, f.description, f.file_path]
+                    .filter(Boolean).join(' ').toLowerCase();
+                return haystack.includes(q);
+            });
+        }
+
+        function renderSevFilterChips() {
+            const row = document.getElementById('sevFilterRow');
+            row.innerHTML = SEVERITY_ORDER.map(sev => `
+                <button type="button" class="sev-chip active" data-sev="${sev}"
+                        style="color:${SEVERITY_COLOR[sev]}" onclick="toggleSevFilter('${sev}')">
+                    <span class="dot" style="background:${SEVERITY_COLOR[sev]}"></span>${sev}
+                </button>
+            `).join('');
+        }
+
+        function toggleSevFilter(sev) {
+            if (issuesFilter.severities.has(sev)) {
+                issuesFilter.severities.delete(sev);
+            } else {
+                issuesFilter.severities.add(sev);
+            }
+            document.querySelectorAll('.sev-chip').forEach(chip => {
+                chip.classList.toggle('active', issuesFilter.severities.has(chip.dataset.sev));
+            });
+            renderIssues();
+        }
+
+        function showTooltip(evt, valueText, labelText) {
+            const tip = document.getElementById('chartTooltip');
+            tip.innerHTML = '';
+            const value = document.createElement('span');
+            value.className = 'tt-value';
+            value.textContent = valueText;
+            const label = document.createElement('span');
+            label.className = 'tt-label';
+            label.textContent = labelText;
+            tip.appendChild(value);
+            tip.appendChild(label);
+            tip.style.display = 'block';
+            tip.style.left = (evt.clientX + 14) + 'px';
+            tip.style.top = (evt.clientY + 14) + 'px';
+        }
+
+        function hideTooltip() {
+            document.getElementById('chartTooltip').style.display = 'none';
+        }
+
+        function renderBarChart(containerId, rows, opts) {
+            const el = document.getElementById(containerId);
+            if (!rows.length) {
+                el.innerHTML = '<div class="chart-empty">No open issues.</div>';
                 return;
             }
-            const rows = findings.map(f => `
+            const max = Math.max(1, ...rows.map(r => r.value));
+            el.innerHTML = rows.map(r => `
+                <div class="bar-row" tabindex="0" data-label="${escapeHtml(r.label)}" data-value="${r.value}">
+                    <div class="bar-label" title="${escapeHtml(r.label)}">${escapeHtml(r.label)}</div>
+                    <div class="bar-track">
+                        <div class="bar-fill" style="width:${(r.value / max * 100).toFixed(1)}%; background:${r.color}"></div>
+                    </div>
+                    <div class="bar-value">${r.value}</div>
+                </div>
+            `).join('');
+            el.querySelectorAll('.bar-row').forEach(row => {
+                const onMove = evt => showTooltip(evt, row.dataset.value, row.dataset.label);
+                row.addEventListener('pointermove', onMove);
+                row.addEventListener('pointerenter', onMove);
+                row.addEventListener('pointerleave', hideTooltip);
+                row.addEventListener('focus', evt => showTooltip(evt, row.dataset.value, row.dataset.label));
+                row.addEventListener('blur', hideTooltip);
+            });
+        }
+
+        function renderStatTiles(filtered) {
+            const counts = {CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0};
+            filtered.forEach(f => { if (counts[f.severity] !== undefined) counts[f.severity]++; });
+            const tiles = [
+                {label: 'Total open', value: filtered.length, accent: '#4a9eff'},
+                {label: 'Critical', value: counts.CRITICAL, accent: SEVERITY_COLOR.CRITICAL},
+                {label: 'High', value: counts.HIGH, accent: SEVERITY_COLOR.HIGH},
+                {label: 'Medium', value: counts.MEDIUM, accent: SEVERITY_COLOR.MEDIUM},
+                {label: 'Low', value: counts.LOW, accent: SEVERITY_COLOR.LOW},
+            ];
+            document.getElementById('statRow').innerHTML = tiles.map(t => `
+                <div class="stat-tile" style="--tile-accent:${t.accent}">
+                    <div class="stat-label">${t.label}</div>
+                    <div class="stat-value">${t.value}</div>
+                </div>
+            `).join('');
+            return counts;
+        }
+
+        function renderCharts(filtered, counts) {
+            renderBarChart('severityChart', SEVERITY_ORDER.map(sev => ({
+                label: sev, value: counts[sev], color: SEVERITY_COLOR[sev],
+            })));
+
+            const byRepo = {};
+            filtered.forEach(f => { byRepo[f.repo] = (byRepo[f.repo] || 0) + 1; });
+            const repoRows = Object.entries(byRepo)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 8)
+                .map(([repo, count]) => ({label: repo, value: count, color: 'var(--series-blue)'}));
+            renderBarChart('repoChart', repoRows);
+        }
+
+        function sortFindings(rows) {
+            const {column, dir} = issuesSort;
+            const mul = dir === 'asc' ? 1 : -1;
+            return rows.slice().sort((a, b) => {
+                let av, bv;
+                if (column === 'severity') { av = SEVERITY_RANK[a.severity]; bv = SEVERITY_RANK[b.severity]; }
+                else if (column === 'scanned_at') { av = a.scanned_at || ''; bv = b.scanned_at || ''; }
+                else { av = (a[column] || '').toLowerCase(); bv = (b[column] || '').toLowerCase(); }
+                if (av < bv) return -1 * mul;
+                if (av > bv) return 1 * mul;
+                return 0;
+            });
+        }
+
+        function sortBy(column) {
+            if (issuesSort.column === column) {
+                issuesSort.dir = issuesSort.dir === 'asc' ? 'desc' : 'asc';
+            } else {
+                issuesSort.column = column;
+                issuesSort.dir = 'asc';
+            }
+            renderIssues();
+        }
+
+        function renderFindingsTable(rows) {
+            const body = document.getElementById('findingsBody');
+            if (!rows.length) {
+                body.innerHTML = '<div class="empty-note">No open findings match these filters.</div>';
+                return;
+            }
+            const cols = [
+                {key: 'severity', label: 'Severity'},
+                {key: 'scanner', label: 'Scanner'},
+                {key: 'repo', label: 'Repo'},
+                {key: 'cve_id', label: 'CVE / Package'},
+                {key: 'scanned_at', label: 'Scanned'},
+            ];
+            const headerHtml = cols.map(c => {
+                const sorted = issuesSort.column === c.key;
+                const arrow = sorted ? (issuesSort.dir === 'asc' ? '▲' : '▼') : '▲';
+                return `<th class="${sorted ? 'sorted' : ''}" onclick="sortBy('${c.key}')">${c.label}<span class="sort-arrow">${arrow}</span></th>`;
+            }).join('') + '<th>Details</th>';
+
+            const rowsHtml = rows.map(f => `
                 <tr>
                     <td class="sev-${f.severity}">${escapeHtml(f.severity)}</td>
                     <td>${escapeHtml(f.scanner)}</td>
                     <td>${escapeHtml(f.repo)}</td>
                     <td>${escapeHtml(f.cve_id || f.package || '—')}</td>
+                    <td>${f.scanned_at ? escapeHtml(new Date(f.scanned_at).toLocaleDateString()) : '—'}</td>
                     <td class="finding-desc">${escapeHtml(f.file_path || '')}${f.description ? ' – ' + escapeHtml(f.description) : ''}</td>
                 </tr>
             `).join('');
+
             body.innerHTML = `
                 <table class="findings-table">
-                    <tr><th>Severity</th><th>Scanner</th><th>Repo</th><th>CVE / Package</th><th>Details</th></tr>
-                    ${rows}
+                    <tr>${headerHtml}</tr>
+                    ${rowsHtml}
                 </table>
             `;
+        }
+
+        function renderIssues() {
+            const filtered = getFilteredFindings();
+            const counts = renderStatTiles(filtered);
+            renderCharts(filtered, counts);
+            document.getElementById('issuesCount').textContent =
+                `Showing ${filtered.length} of ${findings.length} open issues`;
+            renderFindingsTable(sortFindings(filtered));
         }
 
         function saveSelection() {
@@ -680,7 +1000,8 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 
         renderRepos();
         initNotifySettings();
-        renderFindings();
+        renderSevFilterChips();
+        renderIssues();
     </script>
 </body>
 </html>
@@ -694,6 +1015,10 @@ class ConfigUIHandler(BaseHTTPRequestHandler):
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
             self.wfile.write(b'{"status":"healthy"}')
+            return
+
+        if self.path.startswith('/static/'):
+            self.serve_static(self.path[len('/static/'):])
             return
 
         if self.path == '/login':
@@ -750,6 +1075,23 @@ class ConfigUIHandler(BaseHTTPRequestHandler):
         self.send_header('Content-Type', 'text/html; charset=utf-8')
         self.end_headers()
         self.wfile.write(html.encode())
+
+    def serve_static(self, rel_path):
+        rel_path = urllib.parse.unquote(rel_path)
+        full_path = os.path.normpath(os.path.join(STATIC_DIR, rel_path))
+        if not full_path.startswith(STATIC_DIR + os.sep) or not os.path.isfile(full_path):
+            self.send_response(404)
+            self.end_headers()
+            return
+
+        content_type = mimetypes.guess_type(full_path)[0] or 'application/octet-stream'
+        with open(full_path, 'rb') as f:
+            data = f.read()
+        self.send_response(200)
+        self.send_header('Content-Type', content_type)
+        self.send_header('Cache-Control', 'public, max-age=86400')
+        self.end_headers()
+        self.wfile.write(data)
 
     def handle_oauth_callback(self):
         parsed = urllib.parse.urlparse(self.path)
