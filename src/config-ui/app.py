@@ -225,17 +225,26 @@ def get_notify_settings(user_id: str) -> dict:
         conn.close()
 
 
-def get_my_findings_summary(user_id: str) -> list:
+def get_my_findings(user_id: str, limit: int = 100) -> list:
+    """The signed-in user's own open findings, most severe and most recent first."""
     conn = get_db_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
-                SELECT scanner, severity, count(*) AS count
+                SELECT repo, scanner, severity, cve_id, package, file_path,
+                       description, scanned_at
                 FROM findings
                 WHERE owner_user_id = %s AND status = 'open'
-                GROUP BY scanner, severity
-                ORDER BY scanner, severity
-            """, (user_id,))
+                ORDER BY
+                    CASE severity
+                        WHEN 'CRITICAL' THEN 1
+                        WHEN 'HIGH' THEN 2
+                        WHEN 'MEDIUM' THEN 3
+                        ELSE 4
+                    END,
+                    scanned_at DESC
+                LIMIT %s
+            """, (user_id, limit))
             return [dict(row) for row in cur.fetchall()]
     finally:
         conn.close()
@@ -478,9 +487,12 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         .text-input.visible { display: block; }
         .text-input:focus { outline: none; border-color: #4a9eff; }
         .field-hint { color: #666; font-size: 0.8rem; margin-top: 6px; }
-        .findings-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+        .findings-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; table-layout: fixed; }
         .findings-table th, .findings-table td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #222; }
         .findings-table th { color: #888; font-weight: 600; text-transform: uppercase; font-size: 0.75rem; }
+        .findings-table td.finding-desc {
+            color: #aaa; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
         .sev-CRITICAL { color: #ff4d4d; }
         .sev-HIGH { color: #ff9f4d; }
         .sev-MEDIUM { color: #ffd24d; }
@@ -602,6 +614,12 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             updateNotifyUI();
         }
 
+        function escapeHtml(s) {
+            const div = document.createElement('div');
+            div.textContent = s == null ? '' : String(s);
+            return div.innerHTML;
+        }
+
         function renderFindings() {
             const body = document.getElementById('findingsBody');
             if (!findings.length) {
@@ -610,14 +628,16 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             }
             const rows = findings.map(f => `
                 <tr>
-                    <td>${f.scanner}</td>
-                    <td class="sev-${f.severity}">${f.severity}</td>
-                    <td>${f.count}</td>
+                    <td class="sev-${f.severity}">${escapeHtml(f.severity)}</td>
+                    <td>${escapeHtml(f.scanner)}</td>
+                    <td>${escapeHtml(f.repo)}</td>
+                    <td>${escapeHtml(f.cve_id || f.package || '—')}</td>
+                    <td class="finding-desc">${escapeHtml(f.file_path || '')}${f.description ? ' – ' + escapeHtml(f.description) : ''}</td>
                 </tr>
             `).join('');
             body.innerHTML = `
                 <table class="findings-table">
-                    <tr><th>Scanner</th><th>Severity</th><th>Count</th></tr>
+                    <tr><th>Severity</th><th>Scanner</th><th>Repo</th><th>CVE / Package</th><th>Details</th></tr>
                     ${rows}
                 </table>
             `;
@@ -716,13 +736,13 @@ class ConfigUIHandler(BaseHTTPRequestHandler):
         repos = get_user_repos(user['access_token'])
         selected = get_selected_repos(user['id'])
         notify = get_notify_settings(user['id'])
-        findings = get_my_findings_summary(user['id'])
+        findings = get_my_findings(user['id'])
 
         html = (HTML_TEMPLATE
                 .replace('REPOS_JSON', json.dumps(repos))
                 .replace('SELECTED_JSON', json.dumps(selected))
                 .replace('NOTIFY_JSON', json.dumps(notify))
-                .replace('FINDINGS_JSON', json.dumps(findings))
+                .replace('FINDINGS_JSON', json.dumps(findings, default=str))
                 .replace('USER_AVATAR', user['avatar_url'] or '')
                 .replace('USER_NAME', user['username']))
 
