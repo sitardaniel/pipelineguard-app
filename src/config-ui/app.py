@@ -304,6 +304,7 @@ def regenerate_target_repos_configmap():
 LOGIN_HTML = '''<!DOCTYPE html>
 <html>
 <head>
+    <meta charset="UTF-8">
     <title>PipelineGuard - Sign In</title>
     <style>
         body {
@@ -336,6 +337,7 @@ LOGIN_HTML = '''<!DOCTYPE html>
 HTML_TEMPLATE = '''<!DOCTYPE html>
 <html>
 <head>
+    <meta charset="UTF-8">
     <title>PipelineGuard - Select Repos</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -706,7 +708,7 @@ class ConfigUIHandler(BaseHTTPRequestHandler):
         user = get_session_user(session_token)
         if not user:
             self.send_response(200)
-            self.send_header('Content-Type', 'text/html')
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
             self.end_headers()
             self.wfile.write(LOGIN_HTML.encode())
             return
@@ -725,7 +727,7 @@ class ConfigUIHandler(BaseHTTPRequestHandler):
                 .replace('USER_NAME', user['username']))
 
         self.send_response(200)
-        self.send_header('Content-Type', 'text/html')
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
         self.end_headers()
         self.wfile.write(html.encode())
 
