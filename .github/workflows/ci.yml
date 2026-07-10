@@ -36,6 +36,16 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Run PipelineGuard scan
+        # TODO: continue-on-error is a temporary safety net for the first
+        # few real runs against this repo, so we can see what it actually
+        # reports before deciding whether CRITICAL is the right blocking
+        # threshold. Remove once confirmed.
+        continue-on-error: true
+        uses: sitardaniel/pipelineguard-action@main
+        with:
+          fail-on: CRITICAL
+
   notify-on-failure:
     name: Email on issues
     needs: test
