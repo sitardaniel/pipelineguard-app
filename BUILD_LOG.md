@@ -858,3 +858,67 @@ real Slack alert fired to that user's own webhook within one poll cycle.
   self-service view instead.
 
 ---
+
+## Day 9 (continued): Standalone CI Gate Action
+
+### Goal
+The async scan-then-alert pipeline can't stop a bad merge - it only reports
+after the fact. Add a real CI gate: a step any repo can drop into its own
+GitHub Actions workflow that runs the same four scanners synchronously and
+fails the build if anything's found at or above a chosen severity.
+
+### Design
+Standalone by choice - no dependency on the PipelineGuard cluster being up
+or reachable, no shared findings/dashboard. New repo,
+[`pipelineguard-action`](https://github.com/sitardaniel/pipelineguard-action):
+a composite action (`action.yml`) that runs trivy/checkov/gitleaks/grype via
+`docker run`, same exact CLI flags as `pipelineguard-gitops/apps/scanners/*-job.yaml`,
+then `aggregate.py` - a standalone port of `normalizer.py`'s
+`normalize_trivy`/`normalize_checkov`/`normalize_gitleaks`/`normalize_grype`
+parsing (minus the Postgres/multi-user attribution) - decides pass/fail
+against a `fail-on` threshold and writes a summary table to
+`$GITHUB_STEP_SUMMARY`.
+
+### Two Real Bugs Found Writing the Test Workflow
+Built a fixture-based test (`test-fixtures/vulnerable`, `test-fixtures/clean`)
+asserting both the fail and pass paths - and both fixtures initially behaved
+wrong, for two different, genuinely interesting reasons:
+
+1. **AWS's own public example key is allowlisted by gitleaks.**
+   `AKIAIOSFODNN7EXAMPLE` seemed like a perfectly safe, obviously-fake
+   secret to commit into a test fixture - it's AWS's own documented
+   example key. Except gitleaks (like most secret scanners) explicitly
+   allowlists it by default, precisely because it's so common in docs that
+   it'd otherwise be a constant false positive. Swapped in a randomly
+   generated fake GitHub PAT instead.
+2. **`--source <subdir>` doesn't scope gitleaks' history scan to that
+   subdirectory** - it scans the whole repo's commit history regardless,
+   filtering by path only within the diffs it walks. Since both fixtures
+   live in the same repo (and therefore share one git history), the
+   "clean" fixture test kept finding the "vulnerable" fixture's secret too.
+   Fixed by adding `--no-git` (scan the current file tree only, not commit
+   history) - which is also just the more correct design for a per-push CI
+   gate anyway: it should catch what's in the code *now*, not re-flag
+   the same already-rotated historical secret on every single run forever,
+   the way the main system's periodic full-history audit intentionally does.
+
+### Verification
+- `pipelineguard-action`'s own `test.yml`: one job scans the vulnerable
+  fixture with `continue-on-error: true` and asserts the step's outcome was
+  `failure`; another scans the clean fixture and asserts it passes normally.
+  Both pass, for real, after the two fixes above.
+- Integrated into `pipelineguard-app/.github/workflows/ci.yml` for real,
+  not just checked in isolation: added with `continue-on-error: true` first
+  as a dry run, confirmed it genuinely reports zero findings against this
+  repo's actual current state (checkov correctly finds nothing since this
+  is a Python repo with no Terraform; trivy/gitleaks/grype clean), then
+  removed the safety net so it's a real blocking gate (`fail-on: CRITICAL`).
+
+### Follow-ups
+- `@main` is the only ref published - no semver tags cut yet.
+- `fail-on: CRITICAL` was chosen deliberately conservative for this repo's
+  own CI (gitleaks findings are always HIGH in this scheme, so this
+  threshold only ever blocks on real CVE severity, not secrets) - repos
+  adopting this action elsewhere should pick their own threshold.
+
+---
