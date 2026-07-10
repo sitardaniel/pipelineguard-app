@@ -789,3 +789,72 @@ command from Day 1's instructions, not an actual embedded secret).
   inbox), and CI's mail secrets are set.
 
 ---
+
+## Day 9 - July 10, 2026: Per-User GitHub Login and Findings Isolation
+
+### Goal
+Everything up to Day 8 was single-tenant: one shared repo list, one shared
+`GITHUB_USERNAME`, one set of findings and alerts for whoever happened to
+open `config-ui`. Add real GitHub OAuth login so each user picks their own
+repos and only sees their own findings/alerts.
+
+### Changes
+- **Schema**: `users`, `sessions`, `user_repos`, `user_notify_settings`
+  tables, plus `findings.owner_user_id` (nullable - old pre-migration
+  findings stay attributed to nobody rather than being dropped).
+- **Scanners**: `TARGET_REPOS` lines are now `username::repo_url`;
+  git-clone init containers (all four CronJobs) clone into
+  `<username>__<reponame>` instead of a bare repo name.
+- **`normalizer`**: `extract_repo_from_filename` now strips the known
+  scanner prefix and timestamp suffix instead of positionally splitting on
+  `-`, and resolves the embedded username to `owner_user_id`. This also
+  fixed a real pre-existing bug: the old positional split mangled
+  `pipelineguard-app` into the repo name `pipelineguard` for *every*
+  finding ever recorded - visible in every past Slack/email alert as
+  "pipelineguard-pipelineguard". New findings now show the correct name.
+- **`config-ui`**: full rewrite - GitHub OAuth login (`public_repo
+  read:user` scope, no private-repo access), signed session cookies, and
+  everything (repo list, notify settings, "My Findings" summary) scoped to
+  the signed-in user. Fetches repos from `/user/repos` using the user's own
+  token instead of a fixed global identity.
+- **Both alerters**: loop over opted-in users instead of one global send.
+  Slack uses each user's own webhook (`slack-alerter-secret` and its
+  ConfigMap-reading RBAC removed entirely). Email keeps the one shared SMTP
+  relay - asking every user to bring their own Gmail App Password isn't
+  realistic - but personalizes the recipient and content per user.
+
+### Bugs Found Along the Way
+- **Emoji mojibake**: `Content-Type: text/html` with no charset made
+  browsers guess Latin-1, turning `🛡️` into `ðŸ›¡ï¸`. Added
+  `charset=utf-8` to the header and a `<meta charset>` tag - this template
+  never had a non-ASCII character before, so it never surfaced until now.
+- **config-ui logs were fully buffered away**: its Dockerfile ran `python
+  app.py` instead of `python -u app.py` like every other service, so
+  nothing ever reached `kubectl logs` despite the server working correctly.
+- Reconfirmed (from Day 8) that `:latest`-tagged images get cached at both
+  the Kubernetes Deployment level (identical tag string = no rollout
+  trigger) and the kind node's containerd level - every image update in
+  this session needed an explicit `crictl rmi` on the node plus a pod
+  delete, not just a `git push`.
+
+### Verification
+Full loop tested for real, not just checked in isolation: signed in with a
+real GitHub account, selected `pipelineguard-app`, set a real Slack
+webhook + real email in the UI, confirmed all of it landed correctly in
+Postgres and regenerated `TARGET_REPOS` correctly. Manually triggered
+`gitleaks-scanner`, confirmed the clone dir was named
+`sitardaniel__pipelineguard-app`, confirmed the resulting finding had
+`repo=pipelineguard-app` (not the old mangled name) and
+`owner_user_id` correctly resolved to the signed-in user, and confirmed a
+real Slack alert fired to that user's own webhook within one poll cycle.
+
+### Follow-ups
+- Only public repos are scanned by design (OAuth scope deliberately
+  excludes private-repo access) - the scanner CronJobs still clone
+  anonymously, so private repos would fail even with a broader token scope
+  without also plumbing per-user tokens into the clone step.
+- No isolation was added to Grafana - it stays a shared, admin-only
+  overview; `config-ui`'s "My Findings" section is the per-user
+  self-service view instead.
+
+---
