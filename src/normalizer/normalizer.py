@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PipelineGuard Result Normalizer
+BaghGuard Result Normalizer
 
 Watches for scan results from Trivy, Checkov, Gitleaks, and Grype,
 normalizes them to a common schema, and stores them in PostgreSQL.
@@ -31,8 +31,8 @@ logger = logging.getLogger('normalizer')
 # Database configuration
 DB_HOST = os.getenv('DB_HOST', 'postgresql')
 DB_PORT = os.getenv('DB_PORT', '5432')
-DB_NAME = os.getenv('DB_NAME', 'pipelineguard')
-DB_USER = os.getenv('DB_USER', 'pipelineguard')
+DB_NAME = os.getenv('DB_NAME', 'baghguard')
+DB_USER = os.getenv('DB_USER', 'baghguard')
 DB_PASSWORD = os.getenv('DB_PASSWORD', 'localdevpassword')
 
 # Results directory
@@ -303,7 +303,7 @@ def move_to_processed(filepath: str):
 
 def main():
     """Main loop - watch for new scan results and process them."""
-    logger.info("Starting PipelineGuard Result Normalizer")
+    logger.info("Starting BaghGuard Result Normalizer")
     logger.info(f"Watching directory: {RESULTS_DIR}")
     logger.info(f"Poll interval: {POLL_INTERVAL}s")
 

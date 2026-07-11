@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-PipelineGuard is currently in active development. Security fixes are applied to the `main` branch only.
+BaghGuard is currently in active development. Security fixes are applied to the `main` branch only.
 
 | Version | Supported |
 |---------|-----------|
@@ -14,7 +14,7 @@ PipelineGuard is currently in active development. Security fixes are applied to 
 
 **Please do not report security vulnerabilities through public GitHub issues.**
 
-If you discover a security vulnerability in PipelineGuard, please report it responsibly:
+If you discover a security vulnerability in BaghGuard, please report it responsibly:
 
 1. **Email**: Open a private GitHub Security Advisory using the [Security tab](../../security/advisories/new) of this repository.
 2. **Include**:
@@ -32,7 +32,7 @@ You can expect:
 
 ## Security Design Principles
 
-PipelineGuard is built with the following security practices:
+BaghGuard is built with the following security practices:
 
 - **No secrets in Git** - All credentials are managed by HashiCorp Vault
 - **Least privilege** - Kubernetes service accounts are scoped per component

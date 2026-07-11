@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PipelineGuard Config UI
+BaghGuard Config UI
 
 Web interface where each user signs in with their own GitHub account and
 selects which of their own repos get scanned. Findings and notification
@@ -39,15 +39,15 @@ SESSION_TTL_DAYS = 7
 # Database configuration - same pattern as normalizer/alerters
 DB_HOST = os.getenv('DB_HOST', 'postgresql')
 DB_PORT = os.getenv('DB_PORT', '5432')
-DB_NAME = os.getenv('DB_NAME', 'pipelineguard')
-DB_USER = os.getenv('DB_USER', 'pipelineguard')
+DB_NAME = os.getenv('DB_NAME', 'baghguard')
+DB_USER = os.getenv('DB_USER', 'baghguard')
 DB_PASSWORD = os.getenv('DB_PASSWORD', 'localdevpassword')
 
 # scanner-config ConfigMap - still holds the merged TARGET_REPOS every
 # scanner job reads; per-user notification settings now live in Postgres
 # instead of this ConfigMap's NOTIFY_* keys.
 TARGET_CONFIGMAP = os.getenv('TARGET_CONFIGMAP', 'scanner-config')
-TARGET_NAMESPACE = os.getenv('TARGET_NAMESPACE', 'pipelineguard')
+TARGET_NAMESPACE = os.getenv('TARGET_NAMESPACE', 'baghguard')
 
 EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
 
@@ -253,6 +253,40 @@ def get_my_findings(user_id: str, limit: int = 1000) -> list:
         conn.close()
 
 
+def get_severity_trend(user_id: str, days: int = 30) -> list:
+    """Open backlog size per severity for each of the last N days - counts
+    findings that were detected on/before that day and not yet resolved by
+    it, not just newly-detected findings."""
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                WITH day_series AS (
+                    SELECT generate_series(
+                        CURRENT_DATE - (%s - 1) * INTERVAL '1 day',
+                        CURRENT_DATE,
+                        INTERVAL '1 day'
+                    )::date AS day
+                ),
+                severities AS (
+                    SELECT unnest(ARRAY['CRITICAL','HIGH','MEDIUM','LOW']) AS severity
+                )
+                SELECT d.day, s.severity, COUNT(f.id) AS count
+                FROM day_series d
+                CROSS JOIN severities s
+                LEFT JOIN findings f
+                    ON f.owner_user_id = %s
+                    AND f.severity = s.severity
+                    AND f.scanned_at::date <= d.day
+                    AND (f.resolved_at IS NULL OR f.resolved_at::date > d.day)
+                GROUP BY d.day, s.severity
+                ORDER BY d.day, s.severity
+            """, (days, user_id))
+            return [dict(row) for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
 def save_user_data(user_id: str, repos: list, slack_webhook: str, slack_enabled: bool,
                     email_enabled: bool, email_to: list):
     conn = get_db_connection()
@@ -317,7 +351,7 @@ LOGIN_HTML = '''<!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
-    <title>PipelineGuard - Sign In</title>
+    <title>BaghGuard - Sign In</title>
     <link rel="icon" type="image/png" href="/static/logo.png">
     <style>
         body {
@@ -340,7 +374,7 @@ LOGIN_HTML = '''<!DOCTYPE html>
 </head>
 <body>
     <div class="card">
-        <h1><img src="/static/logo.png" alt="" class="logo-icon"> PipelineGuard</h1>
+        <h1><img src="/static/logo.png" alt="" class="logo-icon"> BaghGuard</h1>
         <p>Sign in to pick your own repos and see your own findings.</p>
         <a class="btn" href="/login">Sign in with GitHub</a>
     </div>
@@ -352,7 +386,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
-    <title>PipelineGuard - Select Repos</title>
+    <title>BaghGuard - Select Repos</title>
     <link rel="icon" type="image/png" href="/static/logo.png">
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -534,7 +568,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 
         .chart-row {
             display: grid;
-            grid-template-columns: 1fr 1fr;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
             gap: 16px;
             margin-bottom: 24px;
         }
@@ -571,6 +605,12 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             font-size: 0.85rem;
         }
         .chart-empty { color: var(--ink-muted); font-size: 0.85rem; padding: 10px 0; }
+
+        .trend-card { margin-bottom: 24px; }
+        .trend-svg { width: 100%; height: 200px; display: block; margin-top: 4px; }
+        .trend-legend { display: flex; gap: 16px; margin-bottom: 8px; }
+        .trend-legend-item { display: flex; align-items: center; gap: 6px; font-size: 0.82rem; color: var(--ink-secondary); }
+        .trend-legend-dot { width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto; }
 
         .chart-tooltip {
             position: fixed; pointer-events: none; z-index: 50;
@@ -626,7 +666,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 <body>
     <div class="container">
         <div class="top-bar">
-            <h1><img src="/static/logo.png" alt="" class="logo-icon"> PipelineGuard</h1>
+            <h1><img src="/static/logo.png" alt="" class="logo-icon"> BaghGuard</h1>
             <div class="user-badge">
                 <img src="USER_AVATAR" alt="">
                 <span>USER_NAME</span>
@@ -671,9 +711,19 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                     <div id="severityChart"></div>
                 </div>
                 <div class="chart-card">
+                    <h3>By scanner</h3>
+                    <div id="scannerChart"></div>
+                </div>
+                <div class="chart-card">
                     <h3>By repository</h3>
                     <div id="repoChart"></div>
                 </div>
+            </div>
+
+            <div class="chart-card trend-card">
+                <h3>Open backlog &mdash; last 30 days</h3>
+                <div class="trend-legend" id="trendLegend"></div>
+                <svg id="trendChart" class="trend-svg" viewBox="0 0 600 200" preserveAspectRatio="none"></svg>
             </div>
 
             <div class="issues-filter-row" id="sevFilterRow"></div>
@@ -695,6 +745,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         const selected = SELECTED_JSON;
         const notifySettings = NOTIFY_JSON;
         const findings = FINDINGS_JSON;
+        const trend = TREND_JSON;
 
         function renderRepos(filter = '') {
             const list = document.getElementById('repoList');
@@ -859,6 +910,53 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             });
         }
 
+        function renderTrendChart(trendRows) {
+            const svg = document.getElementById('trendChart');
+            const legend = document.getElementById('trendLegend');
+
+            legend.innerHTML = SEVERITY_ORDER.map(sev => `
+                <div class="trend-legend-item">
+                    <span class="trend-legend-dot" style="background:${SEVERITY_COLOR[sev]}"></span>
+                    ${sev}
+                </div>
+            `).join('');
+
+            if (!trendRows.length) {
+                svg.innerHTML = '<text x="300" y="100" text-anchor="middle" fill="var(--ink-muted)" font-size="12">No history yet.</text>';
+                return;
+            }
+
+            const days = [...new Set(trendRows.map(r => r.day))].sort();
+            const bySeverity = {};
+            SEVERITY_ORDER.forEach(sev => { bySeverity[sev] = days.map(() => 0); });
+            trendRows.forEach(r => {
+                const idx = days.indexOf(r.day);
+                if (idx !== -1 && bySeverity[r.severity]) bySeverity[r.severity][idx] = r.count;
+            });
+
+            const maxCount = Math.max(1, ...Object.values(bySeverity).flat());
+            const w = 600, h = 200, pad = 6;
+            const xStep = days.length > 1 ? (w - 2 * pad) / (days.length - 1) : 0;
+
+            const toPoint = (idx, value) => {
+                const x = pad + idx * xStep;
+                const y = h - pad - (value / maxCount) * (h - 2 * pad);
+                return [x, y];
+            };
+
+            let svgContent = '';
+            SEVERITY_ORDER.forEach(sev => {
+                const series = bySeverity[sev];
+                const points = series.map((v, i) => toPoint(i, v).join(',')).join(' ');
+                svgContent += `<polyline points="${points}" fill="none" stroke="${SEVERITY_COLOR[sev]}" stroke-width="2" />`;
+                series.forEach((v, i) => {
+                    const [x, y] = toPoint(i, v);
+                    svgContent += `<circle cx="${x}" cy="${y}" r="2.5" fill="${SEVERITY_COLOR[sev]}"><title>${escapeHtml(days[i])} — ${sev}: ${v}</title></circle>`;
+                });
+            });
+            svg.innerHTML = svgContent;
+        }
+
         function renderStatTiles(filtered) {
             const counts = {CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0};
             filtered.forEach(f => { if (counts[f.severity] !== undefined) counts[f.severity]++; });
@@ -882,6 +980,13 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             renderBarChart('severityChart', SEVERITY_ORDER.map(sev => ({
                 label: sev, value: counts[sev], color: SEVERITY_COLOR[sev],
             })));
+
+            const byScanner = {};
+            filtered.forEach(f => { byScanner[f.scanner] = (byScanner[f.scanner] || 0) + 1; });
+            const scannerRows = Object.entries(byScanner)
+                .sort((a, b) => b[1] - a[1])
+                .map(([scanner, count]) => ({label: scanner, value: count, color: 'var(--series-blue)'}));
+            renderBarChart('scannerChart', scannerRows);
 
             const byRepo = {};
             filtered.forEach(f => { byRepo[f.repo] = (byRepo[f.repo] || 0) + 1; });
@@ -1002,6 +1107,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         initNotifySettings();
         renderSevFilterChips();
         renderIssues();
+        renderTrendChart(trend);
     </script>
 </body>
 </html>
@@ -1062,12 +1168,14 @@ class ConfigUIHandler(BaseHTTPRequestHandler):
         selected = get_selected_repos(user['id'])
         notify = get_notify_settings(user['id'])
         findings = get_my_findings(user['id'])
+        trend = get_severity_trend(user['id'])
 
         html = (HTML_TEMPLATE
                 .replace('REPOS_JSON', json.dumps(repos))
                 .replace('SELECTED_JSON', json.dumps(selected))
                 .replace('NOTIFY_JSON', json.dumps(notify))
                 .replace('FINDINGS_JSON', json.dumps(findings, default=str))
+                .replace('TREND_JSON', json.dumps(trend, default=str))
                 .replace('USER_AVATAR', user['avatar_url'] or '')
                 .replace('USER_NAME', user['username']))
 
@@ -1186,7 +1294,7 @@ class ConfigUIHandler(BaseHTTPRequestHandler):
 
 
 def main():
-    print(f"Starting PipelineGuard Config UI on port {PORT}")
+    print(f"Starting BaghGuard Config UI on port {PORT}")
     print(f"OAuth configured: {bool(GITHUB_OAUTH_CLIENT_ID)}")
     server = HTTPServer(('0.0.0.0', PORT), ConfigUIHandler)
     server.serve_forever()

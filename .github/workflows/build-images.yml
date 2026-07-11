@@ -42,4 +42,4 @@ jobs:
         with:
           context: src/${{ matrix.service }}
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/pipelineguard-${{ matrix.image_name || matrix.service }}:latest
+          tags: ghcr.io/${{ github.repository_owner }}/baghguard-${{ matrix.image_name || matrix.service }}:latest

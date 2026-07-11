@@ -1,4 +1,4 @@
-# PipelineGuard - Build Log
+# BaghGuard - Build Log
 
 A daily progress journal documenting the build process, issues encountered, and solutions.
 
@@ -21,15 +21,15 @@ A daily progress journal documenting the build process, issues encountered, and 
 - argocd CLI v3.4.4 - installed via Homebrew
 
 #### Tasks Completed
-- [x] Kind cluster created (`kind-pipelineguard`)
+- [x] Kind cluster created (`kind-baghguard`)
 - [x] Argo CD installed (namespace: `argocd`)
 - [x] Argo CD connected to gitops repo
 - [x] Hello-world app deployed via GitOps
 
 #### Cluster Details
-- Cluster name: `pipelineguard`
+- Cluster name: `baghguard`
 - Kubernetes version: v1.35.0
-- Context: `kind-pipelineguard`
+- Context: `kind-baghguard`
 - Argo CD UI: https://localhost:8080
 - Argo CD admin password: retrieve with `kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d`
 
@@ -224,10 +224,10 @@ First scan results after running Trivy and Checkov:
 - Includes: Prometheus, Grafana, Node Exporter, kube-state-metrics
 - PostgreSQL datasource configured for findings queries
 - Pushgateway enabled for scanner job metrics
-- **Access:** http://localhost:3000 (admin/pipelineguard)
+- **Access:** http://localhost:3000 (admin/baghguard)
 
 #### Grafana Dashboard Created
-Custom "PipelineGuard - Security Findings" dashboard with:
+Custom "BaghGuard - Security Findings" dashboard with:
 - Stat panels: Critical, High, Medium counts
 - Pie charts: Findings by Severity, by Scanner
 - Table: Recent Critical & High findings
@@ -237,10 +237,10 @@ Custom "PipelineGuard - Security Findings" dashboard with:
 - HashiCorp Vault in dev mode for local development
 - Root token: `root`
 - Secrets initialized:
-  - `secret/pipelineguard/database` - PostgreSQL credentials
-  - `secret/pipelineguard/github` - GitHub token placeholder
-  - `secret/pipelineguard/slack` - Slack webhook placeholder
-  - `secret/pipelineguard/webhook` - HMAC secret for webhook validation
+  - `secret/baghguard/database` - PostgreSQL credentials
+  - `secret/baghguard/github` - GitHub token placeholder
+  - `secret/baghguard/slack` - Slack webhook placeholder
+  - `secret/baghguard/webhook` - HMAC secret for webhook validation
 
 #### OPA Policy Engine
 - Open Policy Agent deployed with Rego policy
@@ -284,19 +284,19 @@ volumeMounts:
 | App | Namespace | Status |
 |-----|-----------|--------|
 | hello-world | default | Healthy |
-| postgresql | pipelineguard | Healthy |
-| scanners | pipelineguard | Healthy |
-| normalizer | pipelineguard | Healthy |
+| postgresql | baghguard | Healthy |
+| scanners | baghguard | Healthy |
+| normalizer | baghguard | Healthy |
 | kube-prometheus-stack | monitoring | Healthy |
 | vault | vault | Healthy |
-| opa | pipelineguard | Healthy |
+| opa | baghguard | Healthy |
 
 ### Access URLs
 
 | Service | URL | Credentials |
 |---------|-----|-------------|
 | Argo CD | https://localhost:8080 | admin / (see `kubectl -n argocd get secret argocd-initial-admin-secret`) |
-| Grafana | http://localhost:3000 | admin / pipelineguard |
+| Grafana | http://localhost:3000 | admin / baghguard |
 | Vault | http://localhost:8200 | token: root |
 
 ---
@@ -341,8 +341,8 @@ Created Python service that:
 #### Services Built and Deployed
 ```bash
 # Images built and loaded into kind
-pipelineguard/webhook-receiver:latest
-pipelineguard/slack-alerter:latest
+baghguard/webhook-receiver:latest
+baghguard/slack-alerter:latest
 ```
 
 ### Files Created
@@ -366,14 +366,14 @@ pipelineguard/slack-alerter:latest
 | App | Namespace | Status |
 |-----|-----------|--------|
 | hello-world | default | Healthy |
-| postgresql | pipelineguard | Healthy |
-| scanners | pipelineguard | Healthy |
-| normalizer | pipelineguard | Healthy |
+| postgresql | baghguard | Healthy |
+| scanners | baghguard | Healthy |
+| normalizer | baghguard | Healthy |
 | kube-prometheus-stack | monitoring | Healthy |
 | vault | vault | Healthy |
-| opa | pipelineguard | Healthy |
-| webhook-receiver | pipelineguard | Healthy |
-| slack-alerter | pipelineguard | Healthy |
+| opa | baghguard | Healthy |
+| webhook-receiver | baghguard | Healthy |
+| slack-alerter | baghguard | Healthy |
 
 ### Running Pods
 
@@ -484,7 +484,7 @@ Created web UI that allows users to:
 | Service | URL | Credentials |
 |---------|-----|-------------|
 | Argo CD | https://localhost:8080 | admin / (see `kubectl -n argocd get secret argocd-initial-admin-secret`) |
-| Grafana | http://localhost:3000 | admin / pipelineguard |
+| Grafana | http://localhost:3000 | admin / baghguard |
 | Vault | http://localhost:8200 | token: root |
 | Config UI | http://localhost:30090 | - |
 
@@ -677,7 +677,7 @@ opposite problem in each direction:
 - `vault status`: initialized, unsealed, `vault-init-secrets` Job completed.
 - `opa` and `webhook-receiver`: both answering `/health` normally.
 - `email-alerter` is `Synced` in Argo CD but its pod is `ImagePullBackOff` -
-  `pipelineguard/email-alerter:latest` was never actually built. Attempting the
+  `baghguard/email-alerter:latest` was never actually built. Attempting the
   build hit a stuck local Docker Desktop proxy (`http.docker.internal:3128`
   hangs resolving `python:3.11-slim`, even though direct network access from
   the host works fine). Did a full Docker Desktop restart (approved, kind
@@ -694,12 +694,12 @@ opposite problem in each direction:
 Rather than keep fighting the local daemon, added `.github/workflows/build-images.yml`
 to `pipelineguard-app`: builds all five service images (config-ui, email-alerter,
 result-normalizer, slack-alerter, webhook-receiver) in GitHub Actions and pushes
-them to `ghcr.io/sitardaniel/pipelineguard-*`, entirely bypassing the local
+them to `ghcr.io/sitardaniel/baghguard-*`, entirely bypassing the local
 machine. All five build and push successfully; confirmed each is publicly
 pullable via an anonymous GHCR token exchange (no visibility change needed -
 packages inherit public visibility from the public source repo). Repointed all
 five `gitops/apps/*/deployment.yaml` at the GHCR images instead of the
-local-only `pipelineguard/*:latest` refs, which is what was actually blocking
+local-only `baghguard/*:latest` refs, which is what was actually blocking
 email-alerter from ever running - nothing but one laptop's Docker cache could
 ever have pulled those. `email-alerter`'s pod pulled and reached `Running` in
 ~15s once the fix synced.
@@ -741,7 +741,7 @@ intended.
 
 ### A Second Real Bug, Found Swapping in the Real Slack Webhook
 Setting `slack-alerter-secret` to a real Slack Incoming Webhook (new
-`PipelineGuard` Slack app under the SDGOPS workspace) got silently wiped back
+`BaghGuard` Slack app under the SDGOPS workspace) got silently wiped back
 to empty within seconds - Argo CD's `selfHeal` reverting it to git's empty
 placeholder, exactly as designed. This is a real, previously-undiscovered
 architectural bug affecting more than just this secret: `config-ui`'s
@@ -868,7 +868,7 @@ GitHub Actions workflow that runs the same four scanners synchronously and
 fails the build if anything's found at or above a chosen severity.
 
 ### Design
-Standalone by choice - no dependency on the PipelineGuard cluster being up
+Standalone by choice - no dependency on the BaghGuard cluster being up
 or reachable, no shared findings/dashboard. New repo,
 [`pipelineguard-action`](https://github.com/sitardaniel/pipelineguard-action):
 a composite action (`action.yml`) that runs trivy/checkov/gitleaks/grype via

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PipelineGuard Slack Alerter
+BaghGuard Slack Alerter
 
 Monitors PostgreSQL for new critical findings and sends alerts to Slack.
 Integrates with OPA for policy-based alerting decisions.
@@ -29,8 +29,8 @@ logger = logging.getLogger('slack-alerter')
 # Database configuration
 DB_HOST = os.getenv('DB_HOST', 'postgresql')
 DB_PORT = os.getenv('DB_PORT', '5432')
-DB_NAME = os.getenv('DB_NAME', 'pipelineguard')
-DB_USER = os.getenv('DB_USER', 'pipelineguard')
+DB_NAME = os.getenv('DB_NAME', 'baghguard')
+DB_USER = os.getenv('DB_USER', 'baghguard')
 DB_PASSWORD = os.getenv('DB_PASSWORD', 'localdevpassword')
 
 # OPA configuration
@@ -69,7 +69,7 @@ def check_opa_policy(finding: dict) -> dict:
     try:
         data = json.dumps({"input": finding}, default=str).encode()
         req = urllib.request.Request(
-            f"{OPA_URL}/v1/data/pipelineguard/policy",
+            f"{OPA_URL}/v1/data/baghguard/policy",
             data=data,
             headers={'Content-Type': 'application/json'},
             method='POST'
@@ -96,7 +96,7 @@ def send_slack_alert(findings: list, webhook_url: str):
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": ":warning: PipelineGuard Security Alert",
+                "text": ":warning: BaghGuard Security Alert",
                 "emoji": True
             }
         },
@@ -209,7 +209,7 @@ def get_new_findings(conn, since: datetime, owner_user_id) -> list:
 
 def main():
     """Main alerting loop - checks each opted-in user's findings and sends to their own webhook."""
-    logger.info("Starting PipelineGuard Slack Alerter")
+    logger.info("Starting BaghGuard Slack Alerter")
     logger.info(f"Monitoring severities: {ALERT_SEVERITIES}")
     logger.info(f"Poll interval: {POLL_INTERVAL}s")
     logger.info(f"OPA URL: {OPA_URL}")

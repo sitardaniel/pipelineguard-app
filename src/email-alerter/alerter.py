@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PipelineGuard Email Alerter
+BaghGuard Email Alerter
 
 Monitors PostgreSQL for new critical findings and emails alerts via SMTP.
 Integrates with OPA for policy-based alerting decisions, same as the
@@ -31,8 +31,8 @@ logger = logging.getLogger('email-alerter')
 # Database configuration
 DB_HOST = os.getenv('DB_HOST', 'postgresql')
 DB_PORT = os.getenv('DB_PORT', '5432')
-DB_NAME = os.getenv('DB_NAME', 'pipelineguard')
-DB_USER = os.getenv('DB_USER', 'pipelineguard')
+DB_NAME = os.getenv('DB_NAME', 'baghguard')
+DB_USER = os.getenv('DB_USER', 'baghguard')
 DB_PASSWORD = os.getenv('DB_PASSWORD', 'localdevpassword')
 
 # SMTP configuration - one shared relay for everyone; only the recipient
@@ -43,7 +43,7 @@ SMTP_PORT = int(os.getenv('SMTP_PORT', '587'))
 SMTP_USER = os.getenv('SMTP_USER', '')
 SMTP_PASSWORD = os.getenv('SMTP_PASSWORD', '')
 SMTP_USE_TLS = os.getenv('SMTP_USE_TLS', 'true').lower() == 'true'
-ALERT_EMAIL_FROM = os.getenv('ALERT_EMAIL_FROM', 'pipelineguard@localhost')
+ALERT_EMAIL_FROM = os.getenv('ALERT_EMAIL_FROM', 'baghguard@localhost')
 
 # OPA configuration
 OPA_URL = os.getenv('OPA_URL', 'http://opa:8181')
@@ -90,7 +90,7 @@ def check_opa_policy(finding: dict) -> dict:
     try:
         data = json.dumps({"input": finding}, default=str).encode()
         req = urllib.request.Request(
-            f"{OPA_URL}/v1/data/pipelineguard/policy",
+            f"{OPA_URL}/v1/data/baghguard/policy",
             data=data,
             headers={'Content-Type': 'application/json'},
             method='POST'
@@ -125,7 +125,7 @@ def build_email_body(findings: list) -> str:
     return f"""
     <html>
       <body>
-        <h2>&#9888; PipelineGuard Security Alert</h2>
+        <h2>&#9888; BaghGuard Security Alert</h2>
         <p><strong>{len(findings)} new security finding(s) detected</strong></p>
         <table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;">
           <tr style="background:#f6f8fa;">
@@ -149,7 +149,7 @@ def send_email_alert(findings: list, recipients: list):
         return
 
     msg = MIMEMultipart('alternative')
-    msg['Subject'] = f"[PipelineGuard] {len(findings)} new security finding(s)"
+    msg['Subject'] = f"[BaghGuard] {len(findings)} new security finding(s)"
     msg['From'] = ALERT_EMAIL_FROM
     msg['To'] = ', '.join(recipients)
     msg.attach(MIMEText(build_email_body(findings), 'html'))
@@ -192,7 +192,7 @@ def get_new_findings(conn, since: datetime, owner_user_id) -> list:
 
 def main():
     """Main alerting loop - checks each opted-in user's findings and emails them their own digest."""
-    logger.info("Starting PipelineGuard Email Alerter")
+    logger.info("Starting BaghGuard Email Alerter")
     logger.info(f"Monitoring severities: {ALERT_SEVERITIES}")
     logger.info(f"Check interval: {CHECK_INTERVAL_SECONDS}s (~{CHECK_INTERVAL_SECONDS / 3600:.1f}h)")
     logger.info(f"SMTP configured: {bool(SMTP_HOST)}")

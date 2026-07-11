@@ -1,4 +1,4 @@
-# PipelineGuard - App
+# BaghGuard - App
 
 > Automated security scanning platform for GitHub repositories. Runs parallel vulnerability scans on every push and surfaces findings in a centralized dashboard.
 
@@ -12,7 +12,7 @@
 
 ## What This Repo Contains
 
-This is the **application layer** of PipelineGuard. It holds:
+This is the **application layer** of BaghGuard. It holds:
 
 - **Result Normalizer** - Converts scanner output to unified schema, stores in PostgreSQL
 - **Webhook Receiver** - Listens for GitHub push events, triggers scan jobs
@@ -129,7 +129,7 @@ Related repos:
 
 ```bash
 # 1. Create kind cluster
-kind create cluster --name pipelineguard
+kind create cluster --name baghguard
 
 # 2. Install Argo CD
 kubectl create namespace argocd
@@ -142,14 +142,14 @@ kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.pas
 kubectl port-forward svc/argocd-server -n argocd 8080:443
 
 # 5. Build and load images
-docker build -t pipelineguard/result-normalizer:latest src/normalizer/
-docker build -t pipelineguard/webhook-receiver:latest src/webhook-receiver/
-docker build -t pipelineguard/slack-alerter:latest src/slack-alerter/
-docker build -t pipelineguard/email-alerter:latest src/email-alerter/
-kind load docker-image pipelineguard/result-normalizer:latest --name pipelineguard
-kind load docker-image pipelineguard/webhook-receiver:latest --name pipelineguard
-kind load docker-image pipelineguard/slack-alerter:latest --name pipelineguard
-kind load docker-image pipelineguard/email-alerter:latest --name pipelineguard
+docker build -t baghguard/result-normalizer:latest src/normalizer/
+docker build -t baghguard/webhook-receiver:latest src/webhook-receiver/
+docker build -t baghguard/slack-alerter:latest src/slack-alerter/
+docker build -t baghguard/email-alerter:latest src/email-alerter/
+kind load docker-image baghguard/result-normalizer:latest --name baghguard
+kind load docker-image baghguard/webhook-receiver:latest --name baghguard
+kind load docker-image baghguard/slack-alerter:latest --name baghguard
+kind load docker-image baghguard/email-alerter:latest --name baghguard
 
 # 6. Deploy apps via Argo CD (see pipelineguard-gitops)
 ```
@@ -159,7 +159,7 @@ kind load docker-image pipelineguard/email-alerter:latest --name pipelineguard
 | Service | URL | Credentials |
 |---------|-----|-------------|
 | Argo CD | https://localhost:8080 | admin / (see step 3) |
-| Grafana | http://localhost:3000 | admin / pipelineguard |
+| Grafana | http://localhost:3000 | admin / baghguard |
 | Vault | http://localhost:8200 | token: root |
 
 ---
@@ -219,7 +219,7 @@ CREATE TABLE findings (
 ## OPA Policy Example
 
 ```rego
-package pipelineguard.policy
+package baghguard.policy
 
 import rego.v1
 

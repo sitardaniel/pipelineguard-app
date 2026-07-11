@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PipelineGuard Webhook Receiver
+BaghGuard Webhook Receiver
 
 Receives GitHub webhooks and triggers security scans.
 Validates HMAC signatures and creates Kubernetes Jobs.
@@ -26,7 +26,7 @@ logger = logging.getLogger('webhook-receiver')
 
 # Configuration
 WEBHOOK_SECRET = os.getenv('WEBHOOK_SECRET', '')
-NAMESPACE = os.getenv('NAMESPACE', 'pipelineguard')
+NAMESPACE = os.getenv('NAMESPACE', 'baghguard')
 PORT = int(os.getenv('PORT', '8080'))
 
 # Scanner CronJob names to trigger

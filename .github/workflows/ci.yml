@@ -36,7 +36,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Run PipelineGuard scan
+      - name: Run BaghGuard scan
         uses: sitardaniel/pipelineguard-action@main
         with:
           fail-on: CRITICAL
@@ -56,7 +56,7 @@ jobs:
           password: ${{ secrets.SMTP_PASSWORD }}
           from: ${{ secrets.ALERT_EMAIL_FROM }}
           to: ${{ secrets.ALERT_EMAIL_TO }}
-          subject: "[PipelineGuard] CI found issues in ${{ github.repository }}"
+          subject: "[BaghGuard] CI found issues in ${{ github.repository }}"
           body: |
             The "Security lint" job failed for ${{ github.repository }}@${{ github.ref_name }}.
 
