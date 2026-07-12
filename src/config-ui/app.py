@@ -12,10 +12,12 @@ import mimetypes
 import os
 import re
 import secrets
+import smtplib
 import urllib.request
 import urllib.error
 import urllib.parse
 from datetime import datetime, timedelta
+from email.mime.text import MIMEText
 from http import cookies
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -28,9 +30,10 @@ STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
 GITHUB_OAUTH_CLIENT_ID = os.getenv('GITHUB_OAUTH_CLIENT_ID', '')
 GITHUB_OAUTH_CLIENT_SECRET = os.getenv('GITHUB_OAUTH_CLIENT_SECRET', '')
 OAUTH_REDIRECT_URI = os.getenv('OAUTH_REDIRECT_URI', 'http://localhost:8080/auth/callback')
-# public_repo + read:user only - scanning is scoped to each user's public
-# repos, so we never need write access or private-repo contents.
-OAUTH_SCOPE = 'public_repo read:user'
+# public_repo + read:user + user:email - scanning is scoped to each user's
+# public repos, and user:email lets us capture a contact address at
+# sign-in time to notify waitlisted users when BaghGuard goes live.
+OAUTH_SCOPE = 'public_repo read:user user:email'
 
 PORT = int(os.getenv('PORT', '8080'))
 SESSION_COOKIE = 'pg_session'
@@ -51,6 +54,29 @@ TARGET_NAMESPACE = os.getenv('TARGET_NAMESPACE', 'baghguard')
 
 EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
 
+# Waitlist / launch gating - see gitops/apps/config-ui/deployment.yaml
+LAUNCH_AT = datetime.strptime(os.getenv('LAUNCH_AT', '2026-07-16T00:00:00Z'), '%Y-%m-%dT%H:%M:%SZ')
+ADMIN_GITHUB_USERNAMES = {
+    u.strip() for u in os.getenv('ADMIN_GITHUB_USERNAMES', '').split(',') if u.strip()
+}
+
+# SMTP configuration for the one-off "we're live" waitlist email - same
+# relay/creds as email-alerter (see src/email-alerter/alerter.py), reused
+# via the shared email-alerter-secret rather than a second copy.
+SMTP_HOST = os.getenv('SMTP_HOST', '')
+SMTP_PORT = int(os.getenv('SMTP_PORT', '587'))
+SMTP_USER = os.getenv('SMTP_USER', '')
+SMTP_PASSWORD = os.getenv('SMTP_PASSWORD', '')
+SMTP_USE_TLS = os.getenv('SMTP_USE_TLS', 'true').lower() == 'true'
+ALERT_EMAIL_FROM = os.getenv('ALERT_EMAIL_FROM', 'baghguard@localhost')
+
+
+def has_access(user: dict) -> bool:
+    """Whether a signed-in user may use the app, not just view its pages -
+    checked in the data-mutating POST routes too, since a pending user
+    still holds a valid session and could otherwise call them directly."""
+    return user['username'] in ADMIN_GITHUB_USERNAMES or user['approval_status'] == 'approved'
+
 
 def get_db_connection():
     return psycopg2.connect(
@@ -61,20 +87,26 @@ def get_db_connection():
 
 # --- Auth / sessions -------------------------------------------------------
 
-def upsert_user(github_id: int, username: str, avatar_url: str, access_token: str) -> str:
-    """Create or update the user record for this GitHub identity, return user id."""
+def upsert_user(github_id: int, username: str, avatar_url: str, access_token: str, email: str) -> str:
+    """Create or update the user record for this GitHub identity, return user id.
+
+    Deliberately does not touch approval_status on conflict - a returning
+    user keeps whatever waitlist status they already had; only brand new
+    rows get the column's 'pending' default.
+    """
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO users (github_id, username, avatar_url, access_token)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO users (github_id, username, avatar_url, access_token, email)
+                VALUES (%s, %s, %s, %s, %s)
                 ON CONFLICT (github_id) DO UPDATE
                     SET username = EXCLUDED.username,
                         avatar_url = EXCLUDED.avatar_url,
-                        access_token = EXCLUDED.access_token
+                        access_token = EXCLUDED.access_token,
+                        email = EXCLUDED.email
                 RETURNING id
-            """, (github_id, username, avatar_url, access_token))
+            """, (github_id, username, avatar_url, access_token, email))
             user_id = cur.fetchone()[0]
             conn.commit()
             return user_id
@@ -99,14 +131,15 @@ def create_session(user_id: str) -> str:
 
 
 def get_session_user(token: str):
-    """Return the {id, username, avatar_url, access_token} dict for a session token, or None."""
+    """Return the {id, username, avatar_url, access_token, approval_status, email}
+    dict for a session token, or None."""
     if not token:
         return None
     conn = get_db_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
-                SELECT u.id, u.username, u.avatar_url, u.access_token
+                SELECT u.id, u.username, u.avatar_url, u.access_token, u.approval_status, u.email
                 FROM sessions s JOIN users u ON u.id = s.user_id
                 WHERE s.token = %s AND s.expires_at > now()
             """, (token,))
@@ -193,6 +226,28 @@ def fetch_github_profile(access_token: str) -> dict:
     )
     with urllib.request.urlopen(req, timeout=10) as response:
         return json.loads(response.read())
+
+
+def fetch_primary_email(access_token: str) -> str:
+    """The verified primary email for notifying this user when BaghGuard
+    goes live - profile.email is only populated if the user made it public,
+    so /user/emails (granted by the user:email scope) is the reliable source."""
+    try:
+        req = urllib.request.Request(
+            "https://api.github.com/user/emails",
+            headers={'Accept': 'application/vnd.github.v3+json', 'Authorization': f'Bearer {access_token}'}
+        )
+        with urllib.request.urlopen(req, timeout=10) as response:
+            emails = json.loads(response.read())
+        for e in emails:
+            if e.get('primary') and e.get('verified'):
+                return e.get('email', '')
+        for e in emails:
+            if e.get('verified'):
+                return e.get('email', '')
+    except Exception as e:
+        print(f"Error fetching primary email: {e}")
+    return ''
 
 
 # --- Per-user data -----------------------------------------------------------
@@ -312,6 +367,92 @@ def get_severity_trend(user_id: str, days: int = 30) -> list:
         conn.close()
 
 
+# --- Waitlist / admin ---------------------------------------------------
+
+def get_pending_users() -> list:
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT id, username, email, created_at
+                FROM users WHERE approval_status = 'pending'
+                ORDER BY created_at
+            """)
+            return [dict(row) for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def set_approval_status(user_id: str, status: str):
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE users
+                SET approval_status = %s,
+                    approved_at = CASE WHEN %s = 'approved' THEN now() ELSE approved_at END
+                WHERE id = %s
+            """, (status, status, user_id))
+            conn.commit()
+    finally:
+        conn.close()
+
+
+def get_unnotified_pending_users() -> list:
+    """Waitlisted users who haven't been sent the 'we're live' email yet."""
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT id, username, email FROM users
+                WHERE approval_status = 'pending'
+                  AND notified_live_at IS NULL
+                  AND email IS NOT NULL AND email != ''
+            """)
+            return [dict(row) for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def mark_notified(user_id: str):
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE users SET notified_live_at = now() WHERE id = %s", (user_id,))
+            conn.commit()
+    finally:
+        conn.close()
+
+
+def send_launch_email(to_email: str, username: str) -> bool:
+    """Same smtplib pattern as email-alerter's send_email_alert
+    (src/email-alerter/alerter.py) - one shared relay, no per-user setup."""
+    if not SMTP_HOST:
+        print(f"SMTP not configured, would have emailed {to_email}")
+        return False
+
+    msg = MIMEText(
+        f"Hi {username},\n\n"
+        f"BaghGuard is live! You're on the waitlist and we'll let you know as soon as "
+        f"your account is approved.\n\n- BaghGuard"
+    )
+    msg['Subject'] = 'BaghGuard is live'
+    msg['From'] = ALERT_EMAIL_FROM
+    msg['To'] = to_email
+
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as server:
+            if SMTP_USE_TLS:
+                server.starttls()
+            if SMTP_USER:
+                server.login(SMTP_USER, SMTP_PASSWORD)
+            server.sendmail(ALERT_EMAIL_FROM, [to_email], msg.as_string())
+        return True
+    except smtplib.SMTPException as e:
+        print(f"Failed to email {to_email}: {e}")
+        return False
+
+
 def save_user_data(user_id: str, repos: list, slack_webhook: str, slack_enabled: bool,
                     email_enabled: bool, email_to: list, remediate_enabled: bool):
     conn = get_db_connection()
@@ -405,6 +546,232 @@ LOGIN_HTML = '''<!DOCTYPE html>
         <p>Sign in to pick your own repos and see your own findings.</p>
         <a class="btn" href="/login">Sign in with GitHub</a>
     </div>
+</body>
+</html>
+'''
+
+COUNTDOWN_HTML = '''<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>BaghGuard - Coming Soon</title>
+    <link rel="icon" type="image/png" href="/static/logo.png">
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh; color: #fff; display: flex;
+            align-items: center; justify-content: center;
+        }
+        .card { text-align: center; }
+        h1 { font-size: 2.2rem; margin-bottom: 10px; display: flex; align-items: center; justify-content: center; gap: 12px; }
+        .logo-icon { height: 1.2em; width: auto; vertical-align: middle; }
+        p { color: #888; margin-bottom: 30px; }
+        .countdown { display: flex; gap: 20px; justify-content: center; margin-bottom: 30px; }
+        .countdown .unit { min-width: 70px; }
+        .countdown .num { font-size: 2.4rem; font-weight: 700; color: #4a9eff; font-variant-numeric: tabular-nums; }
+        .countdown .label { color: #888; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; }
+        .btn {
+            background: #24292e; color: #fff; border: none; padding: 14px 28px;
+            font-size: 16px; font-weight: 600; border-radius: 8px; cursor: pointer;
+            text-decoration: none; display: inline-flex; align-items: center; gap: 10px;
+        }
+        .btn:hover { background: #333; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1><img src="/static/logo.png" alt="" class="logo-icon"> BaghGuard</h1>
+        <p>Automated security scanning for your repos. Launching soon.</p>
+        <div class="countdown" id="countdown"></div>
+        <a class="btn" href="/login">Join the waitlist</a>
+    </div>
+    <script>
+        const launchAt = new Date('LAUNCH_AT_ISO').getTime();
+        function render() {
+            const diff = Math.max(0, launchAt - Date.now());
+            const d = Math.floor(diff / 86400000);
+            const h = Math.floor(diff % 86400000 / 3600000);
+            const m = Math.floor(diff % 3600000 / 60000);
+            const s = Math.floor(diff % 60000 / 1000);
+            const units = [[d, 'Days'], [h, 'Hours'], [m, 'Min'], [s, 'Sec']];
+            document.getElementById('countdown').innerHTML = units.map(([v, label]) =>
+                `<div class="unit"><div class="num">${String(v).padStart(2, '0')}</div><div class="label">${label}</div></div>`
+            ).join('');
+            if (diff > 0) requestAnimationFrame(() => setTimeout(render, 1000));
+            else location.reload();
+        }
+        render();
+    </script>
+</body>
+</html>
+'''
+
+PENDING_HTML = '''<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>BaghGuard - Waitlisted</title>
+    <link rel="icon" type="image/png" href="/static/logo.png">
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh; color: #fff; display: flex;
+            align-items: center; justify-content: center;
+        }
+        .card { text-align: center; max-width: 420px; }
+        h1 { font-size: 2.2rem; margin-bottom: 10px; display: flex; align-items: center; justify-content: center; gap: 12px; }
+        .logo-icon { height: 1.2em; width: auto; vertical-align: middle; }
+        p { color: #888; margin-bottom: 10px; line-height: 1.5; }
+        .badge {
+            display: inline-block; background: #3a2f0f; color: #fab219; border-radius: 20px;
+            padding: 6px 16px; font-size: 0.85rem; font-weight: 600; margin-bottom: 20px;
+        }
+        .badge.rejected { background: #4a1515; color: #ff6b6b; }
+        a { color: #4a9eff; text-decoration: none; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1><img src="/static/logo.png" alt="" class="logo-icon"> BaghGuard</h1>
+        <div class="badge STATUS_CLASS">STATUS_LABEL</div>
+        <p>Thanks for signing up, USER_NAME. STATUS_MESSAGE</p>
+        <p><a href="/logout">Sign out</a></p>
+    </div>
+</body>
+</html>
+'''
+
+ADMIN_HTML = '''<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>BaghGuard - Admin</title>
+    <link rel="icon" type="image/png" href="/static/logo.png">
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh; color: #fff; padding: 40px 20px;
+        }
+        .container { max-width: 800px; margin: 0 auto; }
+        .top-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; }
+        h1 { font-size: 2rem; display: flex; align-items: center; gap: 10px; }
+        .logo-icon { height: 1.1em; width: auto; }
+        a.back { color: #4a9eff; text-decoration: none; font-size: 0.9rem; }
+        .panel { background: #0f0f1a; border-radius: 12px; padding: 20px; margin-bottom: 24px; }
+        .panel h2 { font-size: 1rem; text-transform: uppercase; letter-spacing: 0.05em; color: #888; margin-bottom: 16px; }
+        table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+        th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #222; }
+        th { color: #888; font-weight: 600; text-transform: uppercase; font-size: 0.75rem; }
+        .empty-note { color: #666; font-size: 0.9rem; padding: 10px 0; }
+        .btn { border: none; padding: 6px 14px; font-size: 0.8rem; font-weight: 600; border-radius: 6px; cursor: pointer; margin-right: 6px; }
+        .btn-approve { background: #1e4620; color: #6ee06e; }
+        .btn-reject { background: #4a1515; color: #ff6b6b; }
+        .btn-notify {
+            background: #4a9eff; color: #fff; padding: 12px 24px; font-size: 15px; border-radius: 8px;
+        }
+        .status { margin-top: 12px; font-size: 0.85rem; color: #888; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="top-bar">
+            <h1><img src="/static/logo.png" alt="" class="logo-icon"> Admin</h1>
+            <a class="back" href="/">&larr; Back to app</a>
+        </div>
+
+        <div class="panel">
+            <h2>Waitlist &mdash; pending approval</h2>
+            <div id="pendingBody"></div>
+        </div>
+
+        <div class="panel">
+            <h2>Launch notification</h2>
+            <div id="notifySection"></div>
+        </div>
+    </div>
+
+    <script>
+        const pending = PENDING_JSON;
+        const launched = LAUNCHED_JSON;
+
+        function escapeHtml(s) {
+            const div = document.createElement('div');
+            div.textContent = s == null ? '' : String(s);
+            return div.innerHTML;
+        }
+
+        function renderPending() {
+            const body = document.getElementById('pendingBody');
+            if (!pending.length) {
+                body.innerHTML = '<div class="empty-note">No one waiting on approval.</div>';
+                return;
+            }
+            body.innerHTML = `
+                <table>
+                    <tr><th>User</th><th>Email</th><th>Requested</th><th></th></tr>
+                    ${pending.map(u => `
+                        <tr data-id="${escapeHtml(u.id)}">
+                            <td>${escapeHtml(u.username)}</td>
+                            <td>${escapeHtml(u.email || '—')}</td>
+                            <td>${u.created_at ? escapeHtml(new Date(u.created_at).toLocaleDateString()) : '—'}</td>
+                            <td>
+                                <button class="btn btn-approve" onclick="decide('${u.id}', 'approved')">Approve</button>
+                                <button class="btn btn-reject" onclick="decide('${u.id}', 'rejected')">Reject</button>
+                            </td>
+                        </tr>
+                    `).join('')}
+                </table>
+            `;
+        }
+
+        function decide(id, status) {
+            fetch('/admin/' + (status === 'approved' ? 'approve' : 'reject'), {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({id: id})
+            })
+            .then(r => r.json().then(data => ({ok: r.ok, data})))
+            .then(({ok, data}) => {
+                if (!ok) { alert('Error: ' + data.error); return; }
+                const idx = pending.findIndex(u => u.id === id);
+                if (idx > -1) pending.splice(idx, 1);
+                renderPending();
+            })
+            .catch(err => alert('Error: ' + err));
+        }
+
+        function renderNotify() {
+            const section = document.getElementById('notifySection');
+            if (!launched) {
+                section.innerHTML = '<div class="empty-note">Unlocks once BaghGuard has launched.</div>';
+                return;
+            }
+            section.innerHTML = `
+                <button class="btn btn-notify" id="notifyBtn" onclick="notifyWaitlist()">Notify waitlist we're live</button>
+                <div class="status" id="notifyStatus"></div>
+            `;
+        }
+
+        function notifyWaitlist() {
+            const btn = document.getElementById('notifyBtn');
+            const status = document.getElementById('notifyStatus');
+            btn.disabled = true;
+            fetch('/admin/notify-waitlist', {method: 'POST'})
+                .then(r => r.json().then(data => ({ok: r.ok, data})))
+                .then(({ok, data}) => {
+                    status.textContent = ok ? `Emailed ${data.count} waitlisted user(s).` : 'Error: ' + data.error;
+                    btn.disabled = false;
+                })
+                .catch(err => { status.textContent = 'Error: ' + err; btn.disabled = false; });
+        }
+
+        renderPending();
+        renderNotify();
+    </script>
 </body>
 </html>
 '''
@@ -708,6 +1075,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             <div class="user-badge">
                 <img src="USER_AVATAR" alt="">
                 <span>USER_NAME</span>
+                ADMIN_LINK
                 <a href="/logout">Sign out</a>
             </div>
         </div>
@@ -1252,10 +1620,42 @@ class ConfigUIHandler(BaseHTTPRequestHandler):
         session_token = parse_cookie(self, SESSION_COOKIE)
         user = get_session_user(session_token)
         if not user:
+            launched = datetime.utcnow() >= LAUNCH_AT
+            page = LOGIN_HTML if launched else COUNTDOWN_HTML.replace('LAUNCH_AT_ISO', LAUNCH_AT.isoformat() + 'Z')
             self.send_response(200)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
             self.end_headers()
-            self.wfile.write(LOGIN_HTML.encode())
+            self.wfile.write(page.encode())
+            return
+
+        is_admin = user['username'] in ADMIN_GITHUB_USERNAMES
+
+        if self.path == '/admin':
+            if not is_admin:
+                self.send_error_json(403, "Admin access only")
+                return
+            html = (ADMIN_HTML
+                    .replace('PENDING_JSON', json.dumps(get_pending_users(), default=str))
+                    .replace('LAUNCHED_JSON', json.dumps(datetime.utcnow() >= LAUNCH_AT)))
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(html.encode())
+            return
+
+        if not has_access(user):
+            status = user['approval_status']
+            page = (PENDING_HTML
+                    .replace('USER_NAME', user['username'])
+                    .replace('STATUS_CLASS', 'rejected' if status == 'rejected' else '')
+                    .replace('STATUS_LABEL', 'Not approved' if status == 'rejected' else 'On the waitlist')
+                    .replace('STATUS_MESSAGE',
+                             "Your request wasn't approved." if status == 'rejected'
+                             else "You'll get access as soon as an admin approves your account."))
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(page.encode())
             return
 
         repos = get_user_repos(user['access_token'])
@@ -1271,6 +1671,7 @@ class ConfigUIHandler(BaseHTTPRequestHandler):
                 .replace('FINDINGS_JSON', json.dumps(findings, default=str))
                 .replace('TREND_JSON', json.dumps(trend, default=str))
                 .replace('USER_AVATAR', user['avatar_url'] or '')
+                .replace('ADMIN_LINK', '<a href="/admin">Admin</a>' if is_admin else '')
                 .replace('USER_NAME', user['username']))
 
         self.send_response(200)
@@ -1312,11 +1713,13 @@ class ConfigUIHandler(BaseHTTPRequestHandler):
                 self.send_error_json(400, "GitHub did not return an access token")
                 return
             profile = fetch_github_profile(access_token)
+            email = fetch_primary_email(access_token)
             user_id = upsert_user(
                 github_id=profile['id'],
                 username=profile['login'],
                 avatar_url=profile.get('avatar_url', ''),
                 access_token=access_token,
+                email=email,
             )
             session_token = create_session(user_id)
         except Exception as e:
@@ -1335,6 +1738,9 @@ class ConfigUIHandler(BaseHTTPRequestHandler):
             user = get_session_user(session_token)
             if not user:
                 self.send_error_json(401, "Not signed in")
+                return
+            if not has_access(user):
+                self.send_error_json(403, "Your account is still on the waitlist")
                 return
 
             content_length = int(self.headers.get('Content-Length', 0))
@@ -1381,6 +1787,9 @@ class ConfigUIHandler(BaseHTTPRequestHandler):
             if not user:
                 self.send_error_json(401, "Not signed in")
                 return
+            if not has_access(user):
+                self.send_error_json(403, "Your account is still on the waitlist")
+                return
 
             content_length = int(self.headers.get('Content-Length', 0))
             body = self.rfile.read(content_length)
@@ -1398,6 +1807,52 @@ class ConfigUIHandler(BaseHTTPRequestHandler):
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps({'status': 'ok'}).encode())
+            return
+
+        if self.path in ('/admin/approve', '/admin/reject'):
+            session_token = parse_cookie(self, SESSION_COOKIE)
+            user = get_session_user(session_token)
+            if not user or user['username'] not in ADMIN_GITHUB_USERNAMES:
+                self.send_error_json(403, "Admin access only")
+                return
+
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length)
+            data = json.loads(body)
+            target_id = data.get('id', '')
+            if not target_id:
+                self.send_error_json(400, "Missing id")
+                return
+
+            set_approval_status(target_id, 'approved' if self.path == '/admin/approve' else 'rejected')
+
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'status': 'ok'}).encode())
+            return
+
+        if self.path == '/admin/notify-waitlist':
+            session_token = parse_cookie(self, SESSION_COOKIE)
+            user = get_session_user(session_token)
+            if not user or user['username'] not in ADMIN_GITHUB_USERNAMES:
+                self.send_error_json(403, "Admin access only")
+                return
+
+            if datetime.utcnow() < LAUNCH_AT:
+                self.send_error_json(400, "Can't notify the waitlist before launch")
+                return
+
+            sent = 0
+            for waiting in get_unnotified_pending_users():
+                if send_launch_email(waiting['email'], waiting['username']):
+                    sent += 1
+                mark_notified(waiting['id'])
+
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'status': 'ok', 'count': sent}).encode())
             return
 
         self.send_response(404)
