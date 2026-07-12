@@ -281,11 +281,16 @@ def insert_findings(findings: list):
                     (repo, scanner, severity, cve_id, package, file_path,
                      line_number, description, fix_version, owner_user_id)
                 VALUES %s
+                ON CONFLICT (repo, scanner, COALESCE(file_path, ''),
+                             COALESCE(cve_id, ''), COALESCE(package, ''),
+                             COALESCE(description, ''))
+                DO UPDATE SET scanned_at = now()
+                WHERE findings.status = 'open'
                 """,
                 values
             )
             conn.commit()
-            logger.info(f"Inserted {len(findings)} findings")
+            logger.info(f"Processed {len(findings)} findings (inserted new, refreshed still-open re-detections)")
     except Exception as e:
         logger.error(f"Failed to insert findings: {e}")
         conn.rollback()

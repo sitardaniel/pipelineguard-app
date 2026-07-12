@@ -229,15 +229,17 @@ def get_notify_settings(user_id: str) -> dict:
 
 
 def get_my_findings(user_id: str, limit: int = 1000) -> list:
-    """The signed-in user's own open findings, most severe and most recent first."""
+    """The signed-in user's own findings (open and ignored), most severe and
+    most recent first. Includes ignored findings so the UI can offer an
+    Ignored view with an un-ignore action; the default UI filter hides them."""
     conn = get_db_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
-                SELECT repo, scanner, severity, cve_id, package, file_path,
-                       description, scanned_at
+                SELECT id, repo, scanner, severity, cve_id, package, file_path,
+                       description, scanned_at, status
                 FROM findings
-                WHERE owner_user_id = %s AND status = 'open'
+                WHERE owner_user_id = %s
                 ORDER BY
                     CASE severity
                         WHEN 'CRITICAL' THEN 1
@@ -249,6 +251,25 @@ def get_my_findings(user_id: str, limit: int = 1000) -> list:
                 LIMIT %s
             """, (user_id, limit))
             return [dict(row) for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def set_finding_status(user_id: str, finding_id: str, status: str):
+    """Set a finding's status, scoped to the owning user so nobody can
+    change another user's findings. Setting a non-open status stamps
+    resolved_at (used both for display and so the trend chart's backlog
+    calculation stops counting it); reopening clears resolved_at again."""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE findings
+                SET status = %s,
+                    resolved_at = CASE WHEN %s != 'open' THEN now() ELSE NULL END
+                WHERE id = %s AND owner_user_id = %s
+            """, (status, status, finding_id, user_id))
+            conn.commit()
     finally:
         conn.close()
 
@@ -632,6 +653,17 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         }
         .sev-chip .dot { width: 8px; height: 8px; border-radius: 50%; }
         .sev-chip.active { color: #fff; border-color: currentColor; background: rgba(255,255,255,0.06); }
+        .status-chip {
+            border: 1px solid #333; background: transparent; border-radius: 20px;
+            padding: 5px 14px; font-size: 0.8rem; font-weight: 600; cursor: pointer;
+            color: var(--ink-secondary);
+        }
+        .status-chip.active { color: #fff; border-color: #4a9eff; background: rgba(74,158,255,0.12); }
+        .btn-link {
+            background: none; border: none; color: #4a9eff; cursor: pointer;
+            font-size: 0.8rem; font-weight: 600; padding: 0; white-space: nowrap;
+        }
+        .btn-link:hover { text-decoration: underline; }
         .issues-search {
             flex: 1 1 200px; min-width: 160px; padding: 8px 12px; font-size: 0.85rem;
             border: 2px solid #333; border-radius: 8px; background: #1a1a2e; color: #fff;
@@ -726,6 +758,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 <svg id="trendChart" class="trend-svg" viewBox="0 0 600 200" preserveAspectRatio="none"></svg>
             </div>
 
+            <div class="issues-filter-row" id="statusFilterRow"></div>
             <div class="issues-filter-row" id="sevFilterRow"></div>
             <input type="text" class="issues-search" id="issuesSearch"
                    placeholder="Search repo, package, CVE, description..." oninput="renderIssues()">
@@ -828,18 +861,60 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 
         const issuesFilter = {
             severities: new Set(SEVERITY_ORDER),
+            status: 'open',
         };
         const issuesSort = {column: 'severity', dir: 'asc'};
 
         function getFilteredFindings() {
             const q = document.getElementById('issuesSearch').value.trim().toLowerCase();
             return findings.filter(f => {
+                if ((f.status || 'open') !== issuesFilter.status) return false;
                 if (!issuesFilter.severities.has(f.severity)) return false;
                 if (!q) return true;
                 const haystack = [f.repo, f.package, f.cve_id, f.description, f.file_path]
                     .filter(Boolean).join(' ').toLowerCase();
                 return haystack.includes(q);
             });
+        }
+
+        function renderStatusFilterToggle() {
+            const row = document.getElementById('statusFilterRow');
+            const counts = {
+                open: findings.filter(f => (f.status || 'open') === 'open').length,
+                ignored: findings.filter(f => f.status === 'ignored').length,
+            };
+            row.innerHTML = ['open', 'ignored'].map(s => `
+                <button type="button" class="status-chip ${issuesFilter.status === s ? 'active' : ''}"
+                        onclick="setStatusFilter('${s}')">
+                    ${s === 'open' ? 'Open' : 'Ignored'} (${counts[s]})
+                </button>
+            `).join('');
+        }
+
+        function setStatusFilter(status) {
+            issuesFilter.status = status;
+            renderStatusFilterToggle();
+            renderIssues();
+        }
+
+        function setFindingStatus(id, status) {
+            fetch('/findings/status', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({id: id, status: status})
+            })
+            .then(r => r.json().then(data => ({ok: r.ok, data})))
+            .then(({ok, data}) => {
+                if (!ok) {
+                    alert('Error: ' + data.error);
+                    return;
+                }
+                const f = findings.find(f => f.id === id);
+                if (f) f.status = status;
+                renderStatusFilterToggle();
+                renderIssues();
+            })
+            .catch(err => alert('Error: ' + err));
         }
 
         function renderSevFilterChips() {
@@ -960,8 +1035,9 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         function renderStatTiles(filtered) {
             const counts = {CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0};
             filtered.forEach(f => { if (counts[f.severity] !== undefined) counts[f.severity]++; });
+            const totalLabel = issuesFilter.status === 'ignored' ? 'Total ignored' : 'Total open';
             const tiles = [
-                {label: 'Total open', value: filtered.length, accent: '#4a9eff'},
+                {label: totalLabel, value: filtered.length, accent: '#4a9eff'},
                 {label: 'Critical', value: counts.CRITICAL, accent: SEVERITY_COLOR.CRITICAL},
                 {label: 'High', value: counts.HIGH, accent: SEVERITY_COLOR.HIGH},
                 {label: 'Medium', value: counts.MEDIUM, accent: SEVERITY_COLOR.MEDIUM},
@@ -1024,7 +1100,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         function renderFindingsTable(rows) {
             const body = document.getElementById('findingsBody');
             if (!rows.length) {
-                body.innerHTML = '<div class="empty-note">No open findings match these filters.</div>';
+                body.innerHTML = `<div class="empty-note">No ${issuesFilter.status} findings match these filters.</div>`;
                 return;
             }
             const cols = [
@@ -1038,16 +1114,19 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 const sorted = issuesSort.column === c.key;
                 const arrow = sorted ? (issuesSort.dir === 'asc' ? '▲' : '▼') : '▲';
                 return `<th class="${sorted ? 'sorted' : ''}" onclick="sortBy('${c.key}')">${c.label}<span class="sort-arrow">${arrow}</span></th>`;
-            }).join('') + '<th>Details</th>';
+            }).join('') + '<th>Details</th><th></th>';
 
             const rowsHtml = rows.map(f => `
-                <tr>
+                <tr data-id="${escapeHtml(f.id)}">
                     <td class="sev-${f.severity}">${escapeHtml(f.severity)}</td>
                     <td>${escapeHtml(f.scanner)}</td>
                     <td>${escapeHtml(f.repo)}</td>
                     <td>${escapeHtml(f.cve_id || f.package || '—')}</td>
                     <td>${f.scanned_at ? escapeHtml(new Date(f.scanned_at).toLocaleDateString()) : '—'}</td>
                     <td class="finding-desc">${escapeHtml(f.file_path || '')}${f.description ? ' – ' + escapeHtml(f.description) : ''}</td>
+                    <td>${f.status === 'ignored'
+                        ? `<button type="button" class="btn-link" onclick="setFindingStatus('${f.id}', 'open')">Un-ignore</button>`
+                        : `<button type="button" class="btn-link" onclick="setFindingStatus('${f.id}', 'ignored')">Ignore</button>`}</td>
                 </tr>
             `).join('');
 
@@ -1063,8 +1142,9 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             const filtered = getFilteredFindings();
             const counts = renderStatTiles(filtered);
             renderCharts(filtered, counts);
+            const totalForStatus = findings.filter(f => (f.status || 'open') === issuesFilter.status).length;
             document.getElementById('issuesCount').textContent =
-                `Showing ${filtered.length} of ${findings.length} open issues`;
+                `Showing ${filtered.length} of ${totalForStatus} ${issuesFilter.status} issues`;
             renderFindingsTable(sortFindings(filtered));
         }
 
@@ -1106,6 +1186,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         renderRepos();
         initNotifySettings();
         renderSevFilterChips();
+        renderStatusFilterToggle();
         renderIssues();
         renderTrendChart(trend);
     </script>
@@ -1278,6 +1359,31 @@ class ConfigUIHandler(BaseHTTPRequestHandler):
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps({'status': 'ok', 'count': len(repos)}).encode())
+            return
+
+        if self.path == '/findings/status':
+            session_token = parse_cookie(self, SESSION_COOKIE)
+            user = get_session_user(session_token)
+            if not user:
+                self.send_error_json(401, "Not signed in")
+                return
+
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length)
+            data = json.loads(body)
+
+            finding_id = data.get('id', '')
+            status = data.get('status', '')
+            if status not in ('open', 'ignored'):
+                self.send_error_json(400, "Invalid status")
+                return
+
+            set_finding_status(user['id'], finding_id, status)
+
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'status': 'ok'}).encode())
             return
 
         self.send_response(404)
