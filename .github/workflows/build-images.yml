@@ -21,6 +21,7 @@ jobs:
           - config-ui
           - email-alerter
           - normalizer
+          - remediator
           - slack-alerter
           - webhook-receiver
         include:

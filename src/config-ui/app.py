@@ -212,17 +212,21 @@ def get_notify_settings(user_id: str) -> dict:
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
-                SELECT slack_webhook, slack_enabled, email_enabled, email_to
+                SELECT slack_webhook, slack_enabled, email_enabled, email_to, remediate_enabled
                 FROM user_notify_settings WHERE user_id = %s
             """, (user_id,))
             row = cur.fetchone()
             if not row:
-                return {'slack_webhook': '', 'slack_enabled': False, 'email_enabled': False, 'email_to': []}
+                return {
+                    'slack_webhook': '', 'slack_enabled': False, 'email_enabled': False,
+                    'email_to': [], 'remediate_enabled': False,
+                }
             return {
                 'slack_webhook': row['slack_webhook'] or '',
                 'slack_enabled': row['slack_enabled'],
                 'email_enabled': row['email_enabled'],
                 'email_to': [a.strip() for a in (row['email_to'] or '').split(',') if a.strip()],
+                'remediate_enabled': row['remediate_enabled'],
             }
     finally:
         conn.close()
@@ -309,7 +313,7 @@ def get_severity_trend(user_id: str, days: int = 30) -> list:
 
 
 def save_user_data(user_id: str, repos: list, slack_webhook: str, slack_enabled: bool,
-                    email_enabled: bool, email_to: list):
+                    email_enabled: bool, email_to: list, remediate_enabled: bool):
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
@@ -320,14 +324,16 @@ def save_user_data(user_id: str, repos: list, slack_webhook: str, slack_enabled:
                     (user_id, repo_url)
                 )
             cur.execute("""
-                INSERT INTO user_notify_settings (user_id, slack_webhook, slack_enabled, email_enabled, email_to)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO user_notify_settings
+                    (user_id, slack_webhook, slack_enabled, email_enabled, email_to, remediate_enabled)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT (user_id) DO UPDATE
                     SET slack_webhook = EXCLUDED.slack_webhook,
                         slack_enabled = EXCLUDED.slack_enabled,
                         email_enabled = EXCLUDED.email_enabled,
-                        email_to = EXCLUDED.email_to
-            """, (user_id, slack_webhook, slack_enabled, email_enabled, ','.join(email_to)))
+                        email_to = EXCLUDED.email_to,
+                        remediate_enabled = EXCLUDED.remediate_enabled
+            """, (user_id, slack_webhook, slack_enabled, email_enabled, ','.join(email_to), remediate_enabled))
             conn.commit()
     finally:
         conn.close()
@@ -730,6 +736,11 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             </label>
             <input type="text" class="text-input" id="emailTo" placeholder="you@example.com, teammate@example.com">
             <div class="field-hint">Critical and high-severity findings only. Comma-separate multiple email addresses.</div>
+            <label class="check-row">
+                <input type="checkbox" id="remediateEnabled">
+                Open fix PRs automatically
+            </label>
+            <div class="field-hint">Critical/high findings with a known fix in a plain requirements.txt pin only. Opens a real PR on your repo using your GitHub login - review before merging.</div>
         </div>
 
         <div class="findings-section">
@@ -839,6 +850,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             document.getElementById('slackWebhook').value = notifySettings.slack_webhook;
             document.getElementById('emailEnabled').checked = notifySettings.email_enabled;
             document.getElementById('emailTo').value = notifySettings.email_to.join(', ');
+            document.getElementById('remediateEnabled').checked = notifySettings.remediate_enabled;
             updateNotifyUI();
         }
 
@@ -1158,7 +1170,8 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 slack_enabled: document.getElementById('slackEnabled').checked,
                 slack_webhook: document.getElementById('slackWebhook').value.trim(),
                 email_enabled: document.getElementById('emailEnabled').checked,
-                email_to: document.getElementById('emailTo').value.split(',').map(s => s.trim()).filter(Boolean)
+                email_to: document.getElementById('emailTo').value.split(',').map(s => s.trim()).filter(Boolean),
+                remediate_enabled: document.getElementById('remediateEnabled').checked
             };
 
             fetch('/save', {
@@ -1334,6 +1347,7 @@ class ConfigUIHandler(BaseHTTPRequestHandler):
             slack_webhook = notify.get('slack_webhook', '').strip()
             email_enabled = bool(notify.get('email_enabled', False))
             email_to = [a.strip() for a in notify.get('email_to', []) if a.strip()]
+            remediate_enabled = bool(notify.get('remediate_enabled', False))
 
             if slack_enabled and not slack_webhook:
                 self.send_error_json(400, "Enable Slack alerts requires a webhook URL.")
@@ -1348,7 +1362,7 @@ class ConfigUIHandler(BaseHTTPRequestHandler):
                     self.send_error_json(400, f"Invalid email address: {invalid[0]}")
                     return
 
-            save_user_data(user['id'], repos, slack_webhook, slack_enabled, email_enabled, email_to)
+            save_user_data(user['id'], repos, slack_webhook, slack_enabled, email_enabled, email_to, remediate_enabled)
 
             try:
                 regenerate_target_repos_configmap()
