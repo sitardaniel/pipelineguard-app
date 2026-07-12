@@ -22,6 +22,7 @@ import urllib.request
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
+from packaging.version import Version, InvalidVersion
 
 # Configure logging
 logging.basicConfig(
@@ -99,6 +100,38 @@ def get_candidate_findings(conn, user_id, severities: list) -> list:
                 CASE f.severity WHEN 'CRITICAL' THEN 1 WHEN 'HIGH' THEN 2 ELSE 3 END
         """, (user_id, severities))
         return cur.fetchall()
+
+
+def group_candidates(findings: list) -> list:
+    """Group findings that are really the same pin (repo + file + package),
+    just flagged by multiple CVEs. Opening one competing PR per CVE means
+    merging any one of them leaves the others stale/conflicting against a
+    version pin that's no longer there - grouping means one PR per pin,
+    covering every CVE it happens to also fix."""
+    groups = {}
+    for f in findings:
+        key = (f['repo'], f['file_path'], f['package'])
+        groups.setdefault(key, []).append(f)
+    return list(groups.values())
+
+
+def _parsed_version(version_str: str):
+    try:
+        return Version(version_str)
+    except InvalidVersion:
+        return None
+
+
+def pick_best_fix(group: list) -> dict:
+    """The group member whose fix_version is highest wins - its fix_version
+    is the one actually applied, since it's guaranteed to also clear every
+    lower-versioned CVE in the same group. Falls back to string comparison
+    only if a fix_version isn't valid PEP 440 (rare scanner-output oddity),
+    rather than guessing wrong."""
+    parsed = [(f, _parsed_version(f['fix_version'])) for f in group]
+    if all(v is not None for _, v in parsed):
+        return max(parsed, key=lambda pair: pair[1])[0]
+    return max(group, key=lambda f: f['fix_version'])
 
 
 def record_remediation(conn, finding_id, status: str, pr_url: str = None,
@@ -223,66 +256,86 @@ def sanitize_branch_component(value: str) -> str:
 
 # --- Remediation flow -----------------------------------------------------
 
-def remediate_finding(conn, finding: dict, token: str, repo_cache: dict):
-    finding_id = finding['id']
-    owner = finding['username']
-    repo = finding['repo']
-    file_path = finding['file_path']
+def remediate_group(conn, group: list, token: str, repo_cache: dict):
+    """Remediate one (repo, file_path, package) group - may be backed by
+    several CVE findings for the same pin. Every finding_id in the group
+    gets the same outcome recorded, so none of them are ever retried
+    individually even though only one PR gets opened for the whole group."""
+    finding_ids = [f['id'] for f in group]
+    representative = group[0]
+    owner = representative['username']
+    repo = representative['repo']
+    file_path = representative['file_path']
+
+    def record_all(status, pr_url=None, branch_name=None, detail=None):
+        for finding_id in finding_ids:
+            record_remediation(conn, finding_id, status, pr_url=pr_url,
+                                branch_name=branch_name, detail=detail)
 
     try:
-        pkg_name, installed_version = finding['package'].rsplit(' ', 1)
+        pkg_name, installed_version = representative['package'].rsplit(' ', 1)
     except ValueError:
-        logger.warning(f"{owner}/{repo}: can't parse package/version from {finding['package']!r}")
-        record_remediation(conn, finding_id, 'unsupported', detail='Unparseable package field')
+        logger.warning(f"{owner}/{repo}: can't parse package/version from {representative['package']!r}")
+        record_all('unsupported', detail='Unparseable package field')
         return
+
+    best = pick_best_fix(group)
+    cve_ids = sorted({f['cve_id'] for f in group if f['cve_id']})
 
     try:
         default_branch = get_default_branch(token, owner, repo, repo_cache)
         content, sha = get_file_contents(token, owner, repo, file_path, default_branch)
     except Exception as e:
         logger.error(f"{owner}/{repo}: failed to fetch {file_path}: {e}")
-        record_remediation(conn, finding_id, 'failed', detail=str(e))
+        record_all('failed', detail=str(e))
         return
 
-    patched = patch_requirements(content, pkg_name, installed_version, finding['fix_version'])
+    patched = patch_requirements(content, pkg_name, installed_version, best['fix_version'])
     if patched is None:
         logger.info(f"{owner}/{repo}: no line pins {pkg_name}=={installed_version} in {file_path}, skipping")
-        record_remediation(
-            conn, finding_id, 'unsupported',
+        record_all(
+            'unsupported',
             detail=f"No line pinning {pkg_name}=={installed_version} found in {file_path}"
         )
         return
 
     branch = (
         f"baghguard/fix-{sanitize_branch_component(pkg_name)}"
-        f"-{sanitize_branch_component(finding['cve_id'] or 'nocve')}"
+        f"-{sanitize_branch_component(best['fix_version'])}"
     )
+    cve_label = ', '.join(cve_ids) if cve_ids else 'security fix'
 
     try:
         create_branch(token, owner, repo, branch, default_branch)
         commit_file(
             token, owner, repo, file_path, branch, patched, sha,
-            message=f"Bump {pkg_name} to {finding['fix_version']} ({finding['cve_id'] or 'security fix'})",
+            message=f"Bump {pkg_name} to {best['fix_version']} ({cve_label})",
         )
+        severity_label = max(
+            (f['severity'] for f in group),
+            key=lambda s: {'CRITICAL': 0, 'HIGH': 1, 'MEDIUM': 2}.get(s, 3)
+        )
+        descriptions = '\n\n'.join(sorted({f['description'] for f in group if f['description']}))
         pr_url, _ = open_pull_request(
             token, owner, repo, branch, default_branch,
-            title=f"[BaghGuard] Fix {finding['severity']} {finding['cve_id'] or ''} in {pkg_name}".strip(),
+            title=f"[BaghGuard] Fix {severity_label} {cve_label} in {pkg_name}".strip(),
             body=(
-                f"BaghGuard detected a **{finding['severity']}** vulnerability in "
-                f"`{pkg_name} {installed_version}` ({finding['cve_id'] or 'no CVE id'}) and opened this PR "
+                f"BaghGuard detected {len(group)} "
+                f"{'vulnerability' if len(group) == 1 else 'vulnerabilities'} in "
+                f"`{pkg_name} {installed_version}` ({cve_label}) and opened this PR "
                 f"automatically because you enabled auto-remediation.\n\n"
-                f"**Fix:** bump to `{finding['fix_version']}`.\n\n"
-                f"{finding['description'] or ''}\n\n"
+                f"**Fix:** bump to `{best['fix_version']}` (covers all of the above).\n\n"
+                f"{descriptions}\n\n"
                 f"Please review the diff before merging."
             ),
         )
     except Exception as e:
         logger.error(f"{owner}/{repo}: failed to open remediation PR for {pkg_name}: {e}")
-        record_remediation(conn, finding_id, 'failed', branch_name=branch, detail=str(e))
+        record_all('failed', branch_name=branch, detail=str(e))
         return
 
-    logger.info(f"{owner}/{repo}: opened {pr_url}")
-    record_remediation(conn, finding_id, 'open', pr_url=pr_url, branch_name=branch)
+    logger.info(f"{owner}/{repo}: opened {pr_url} (covers {len(group)} finding(s))")
+    record_all('open', pr_url=pr_url, branch_name=branch)
 
 
 def main():
@@ -315,10 +368,14 @@ def main():
                 if not findings:
                     continue
 
-                logger.info(f"{user['username']}: {len(findings)} finding(s) eligible for auto-remediation")
+                groups = group_candidates([dict(f) for f in findings])
+                logger.info(
+                    f"{user['username']}: {len(findings)} finding(s) eligible for auto-remediation "
+                    f"({len(groups)} PR(s) after grouping by package)"
+                )
                 repo_cache = {}
-                for finding in findings:
-                    remediate_finding(conn, dict(finding), user['access_token'], repo_cache)
+                for group in groups:
+                    remediate_group(conn, group, user['access_token'], repo_cache)
 
             conn.close()
 
