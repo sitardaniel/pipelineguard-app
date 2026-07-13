@@ -55,7 +55,7 @@ TARGET_NAMESPACE = os.getenv('TARGET_NAMESPACE', 'baghguard')
 EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
 
 # Waitlist / launch gating - see gitops/apps/config-ui/deployment.yaml
-LAUNCH_AT = datetime.strptime(os.getenv('LAUNCH_AT', '2026-07-16T00:00:00Z'), '%Y-%m-%dT%H:%M:%SZ')
+LAUNCH_AT = datetime.strptime(os.getenv('LAUNCH_AT', '2026-07-16T07:00:00Z'), '%Y-%m-%dT%H:%M:%SZ')
 ADMIN_GITHUB_USERNAMES = {
     u.strip() for u in os.getenv('ADMIN_GITHUB_USERNAMES', '').split(',') if u.strip()
 }
@@ -383,6 +383,19 @@ def get_pending_users() -> list:
         conn.close()
 
 
+def get_approval_counts() -> dict:
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT approval_status, COUNT(*) FROM users GROUP BY approval_status
+            """)
+            counts = dict(cur.fetchall())
+            return {'pending': counts.get('pending', 0), 'approved': counts.get('approved', 0)}
+    finally:
+        conn.close()
+
+
 def set_approval_status(user_id: str, status: str):
     conn = get_db_connection()
     try:
@@ -636,7 +649,7 @@ PENDING_HTML = '''<!DOCTYPE html>
     <div class="card">
         <h1><img src="/static/logo.png" alt="" class="logo-icon"> BaghGuard</h1>
         <div class="badge STATUS_CLASS">STATUS_LABEL</div>
-        <p>Thanks for signing up, USER_NAME. STATUS_MESSAGE</p>
+        <p>Thanks for signing up. STATUS_MESSAGE</p>
         <p><a href="/logout">Sign out</a></p>
     </div>
 </body>
@@ -674,6 +687,12 @@ ADMIN_HTML = '''<!DOCTYPE html>
             background: #4a9eff; color: #fff; padding: 12px 24px; font-size: 15px; border-radius: 8px;
         }
         .status { margin-top: 12px; font-size: 0.85rem; color: #888; }
+        .stats { display: flex; gap: 16px; margin-bottom: 24px; }
+        .stat { flex: 1; background: #0f0f1a; border-radius: 12px; padding: 16px 20px; }
+        .stat-num { font-size: 1.8rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+        .stat-label { color: #888; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 4px; }
+        .stat.pending .stat-num { color: #fab219; }
+        .stat.approved .stat-num { color: #6ee06e; }
     </style>
 </head>
 <body>
@@ -681,6 +700,17 @@ ADMIN_HTML = '''<!DOCTYPE html>
         <div class="top-bar">
             <h1><img src="/static/logo.png" alt="" class="logo-icon"> Admin</h1>
             <a class="back" href="/">&larr; Back to app</a>
+        </div>
+
+        <div class="stats">
+            <div class="stat pending">
+                <div class="stat-num">PENDING_COUNT</div>
+                <div class="stat-label">On the waitlist</div>
+            </div>
+            <div class="stat approved">
+                <div class="stat-num">APPROVED_COUNT</div>
+                <div class="stat-label">Approved</div>
+            </div>
         </div>
 
         <div class="panel">
@@ -740,6 +770,11 @@ ADMIN_HTML = '''<!DOCTYPE html>
                 const idx = pending.findIndex(u => u.id === id);
                 if (idx > -1) pending.splice(idx, 1);
                 renderPending();
+                document.querySelector('.stat.pending .stat-num').textContent = pending.length;
+                if (status === 'approved') {
+                    const approvedEl = document.querySelector('.stat.approved .stat-num');
+                    approvedEl.textContent = Number(approvedEl.textContent) + 1;
+                }
             })
             .catch(err => alert('Error: ' + err));
         }
@@ -1634,9 +1669,12 @@ class ConfigUIHandler(BaseHTTPRequestHandler):
             if not is_admin:
                 self.send_error_json(403, "Admin access only")
                 return
+            counts = get_approval_counts()
             html = (ADMIN_HTML
                     .replace('PENDING_JSON', json.dumps(get_pending_users(), default=str))
-                    .replace('LAUNCHED_JSON', json.dumps(datetime.utcnow() >= LAUNCH_AT)))
+                    .replace('LAUNCHED_JSON', json.dumps(datetime.utcnow() >= LAUNCH_AT))
+                    .replace('PENDING_COUNT', str(counts['pending']))
+                    .replace('APPROVED_COUNT', str(counts['approved'])))
             self.send_response(200)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
             self.end_headers()
@@ -1646,12 +1684,11 @@ class ConfigUIHandler(BaseHTTPRequestHandler):
         if not has_access(user):
             status = user['approval_status']
             page = (PENDING_HTML
-                    .replace('USER_NAME', user['username'])
                     .replace('STATUS_CLASS', 'rejected' if status == 'rejected' else '')
                     .replace('STATUS_LABEL', 'Not approved' if status == 'rejected' else 'On the waitlist')
                     .replace('STATUS_MESSAGE',
                              "Your request wasn't approved." if status == 'rejected'
-                             else "You'll get access as soon as an admin approves your account."))
+                             else "You'll be able to log in on Thursday, once an admin approves your account."))
             self.send_response(200)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
             self.end_headers()
