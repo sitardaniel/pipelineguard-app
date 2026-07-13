@@ -396,17 +396,21 @@ def get_approval_counts() -> dict:
         conn.close()
 
 
-def set_approval_status(user_id: str, status: str):
+def set_approval_status(user_id: str, status: str) -> dict:
+    """Returns the affected user's {username, email} so callers can notify them."""
     conn = get_db_connection()
     try:
-        with conn.cursor() as cur:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
                 UPDATE users
                 SET approval_status = %s,
                     approved_at = CASE WHEN %s = 'approved' THEN now() ELSE approved_at END
                 WHERE id = %s
+                RETURNING username, email
             """, (status, status, user_id))
+            row = cur.fetchone()
             conn.commit()
+            return dict(row) if row else {}
     finally:
         conn.close()
 
@@ -437,19 +441,15 @@ def mark_notified(user_id: str):
         conn.close()
 
 
-def send_launch_email(to_email: str, username: str) -> bool:
+def _send_email(to_email: str, subject: str, body: str) -> bool:
     """Same smtplib pattern as email-alerter's send_email_alert
     (src/email-alerter/alerter.py) - one shared relay, no per-user setup."""
     if not SMTP_HOST:
-        print(f"SMTP not configured, would have emailed {to_email}")
+        print(f"SMTP not configured, would have emailed {to_email}: {subject}")
         return False
 
-    msg = MIMEText(
-        f"Hi {username},\n\n"
-        f"BaghGuard is live! You're on the waitlist and we'll let you know as soon as "
-        f"your account is approved.\n\n- BaghGuard"
-    )
-    msg['Subject'] = 'BaghGuard is live'
+    msg = MIMEText(body)
+    msg['Subject'] = subject
     msg['From'] = ALERT_EMAIL_FROM
     msg['To'] = to_email
 
@@ -464,6 +464,26 @@ def send_launch_email(to_email: str, username: str) -> bool:
     except smtplib.SMTPException as e:
         print(f"Failed to email {to_email}: {e}")
         return False
+
+
+def send_launch_email(to_email: str, username: str) -> bool:
+    return _send_email(
+        to_email,
+        'BaghGuard is live',
+        f"Hi {username},\n\n"
+        f"BaghGuard is live! You're on the waitlist and we'll let you know as soon as "
+        f"your account is approved.\n\n- BaghGuard"
+    )
+
+
+def send_approval_email(to_email: str, username: str) -> bool:
+    return _send_email(
+        to_email,
+        "You're approved for BaghGuard",
+        f"Hi {username},\n\n"
+        f"Your BaghGuard account has been approved. Log in and pick the repos "
+        f"you'd like to start scanning.\n\n- BaghGuard"
+    )
 
 
 def save_user_data(user_id: str, repos: list, slack_webhook: str, slack_enabled: bool,
@@ -1861,7 +1881,10 @@ class ConfigUIHandler(BaseHTTPRequestHandler):
                 self.send_error_json(400, "Missing id")
                 return
 
-            set_approval_status(target_id, 'approved' if self.path == '/admin/approve' else 'rejected')
+            approving = self.path == '/admin/approve'
+            target = set_approval_status(target_id, 'approved' if approving else 'rejected')
+            if approving and target.get('email'):
+                send_approval_email(target['email'], target['username'])
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
