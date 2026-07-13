@@ -111,7 +111,6 @@ Related repos:
 | PostgreSQL | Stores normalized findings with severity, CVE, package info |
 | Grafana | Security findings dashboard with severity charts and tables |
 | Prometheus | Cluster and scanner job metrics |
-| Vault | Secrets management (dev mode for local) |
 | OPA | Policy-as-code for alert decisions |
 
 ---
@@ -160,7 +159,6 @@ kind load docker-image baghguard/email-alerter:latest --name baghguard
 |---------|-----|-------------|
 | Argo CD | https://localhost:8080 | admin / (see step 3) |
 | Grafana | http://localhost:3000 | admin / baghguard |
-| Vault | http://localhost:8200 | token: root |
 
 ---
 
