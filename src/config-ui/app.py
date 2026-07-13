@@ -26,7 +26,7 @@ from psycopg2.extras import RealDictCursor
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
 
-# GitHub OAuth App credentials - see gitops/apps/config-ui/deployment.yaml
+# GitHub OAuth App credentials - see gitops/apps/config-ui/secret.yaml
 GITHUB_OAUTH_CLIENT_ID = os.getenv('GITHUB_OAUTH_CLIENT_ID', '')
 GITHUB_OAUTH_CLIENT_SECRET = os.getenv('GITHUB_OAUTH_CLIENT_SECRET', '')
 OAUTH_REDIRECT_URI = os.getenv('OAUTH_REDIRECT_URI', 'http://localhost:8080/auth/callback')
