@@ -415,6 +415,24 @@ def set_approval_status(user_id: str, status: str) -> dict:
         conn.close()
 
 
+def request_approval_again(user_id: str) -> bool:
+    """Move a rejected user back to 'pending' so they re-enter the waitlist
+    queue. Scoped to rows currently 'rejected' - a no-op for users who are
+    already pending or approved."""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE users SET approval_status = 'pending'
+                WHERE id = %s AND approval_status = 'rejected'
+            """, (user_id,))
+            updated = cur.rowcount > 0
+            conn.commit()
+            return updated
+    finally:
+        conn.close()
+
+
 def get_unnotified_pending_users() -> list:
     """Waitlisted users who haven't been sent the 'we're live' email yet."""
     conn = get_db_connection()
@@ -663,6 +681,11 @@ PENDING_HTML = '''<!DOCTYPE html>
         }
         .badge.rejected { background: #4a1515; color: #ff6b6b; }
         a { color: #4a9eff; text-decoration: none; }
+        .btn {
+            display: inline-block; background: #4a9eff; color: #fff; border: none;
+            padding: 10px 20px; font-size: 0.9rem; font-weight: 600; border-radius: 8px;
+            cursor: pointer; margin-bottom: 14px;
+        }
     </style>
 </head>
 <body>
@@ -670,6 +693,7 @@ PENDING_HTML = '''<!DOCTYPE html>
         <h1><img src="/static/logo.png" alt="" class="logo-icon"> BaghGuard</h1>
         <div class="badge STATUS_CLASS">STATUS_LABEL</div>
         <p>Thanks for signing up. STATUS_MESSAGE</p>
+        REQUEST_AGAIN
         <p><a href="/logout">Sign out</a></p>
     </div>
 </body>
@@ -1703,12 +1727,19 @@ class ConfigUIHandler(BaseHTTPRequestHandler):
 
         if not has_access(user):
             status = user['approval_status']
+            request_again = (
+                '<form method="POST" action="/request-again">'
+                '<button class="btn" type="submit">Request approval again</button></form>'
+                if status == 'rejected' else ''
+            )
             page = (PENDING_HTML
                     .replace('STATUS_CLASS', 'rejected' if status == 'rejected' else '')
                     .replace('STATUS_LABEL', 'Not approved' if status == 'rejected' else 'On the waitlist')
                     .replace('STATUS_MESSAGE',
-                             "Your request wasn't approved." if status == 'rejected'
-                             else "You'll be able to log in on Thursday, once an admin approves your account."))
+                             "Your request wasn't approved. You can ask for another review below."
+                             if status == 'rejected'
+                             else "You'll be able to log in on Thursday, once an admin approves your account.")
+                    .replace('REQUEST_AGAIN', request_again))
             self.send_response(200)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
             self.end_headers()
@@ -1864,6 +1895,20 @@ class ConfigUIHandler(BaseHTTPRequestHandler):
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps({'status': 'ok'}).encode())
+            return
+
+        if self.path == '/request-again':
+            session_token = parse_cookie(self, SESSION_COOKIE)
+            user = get_session_user(session_token)
+            if not user:
+                self.send_error_json(401, "Not signed in")
+                return
+
+            request_approval_again(user['id'])
+
+            self.send_response(302)
+            self.send_header('Location', '/')
+            self.end_headers()
             return
 
         if self.path in ('/admin/approve', '/admin/reject'):
