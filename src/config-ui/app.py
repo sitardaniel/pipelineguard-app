@@ -855,7 +855,14 @@ ADMIN_HTML = '''<!DOCTYPE html>
 </html>
 '''
 
-HTML_TEMPLATE = '''<!DOCTYPE html>
+NAV_HTML = '''
+        <div class="nav-tabs">
+            <a class="nav-tab NAV_REPOS_ACTIVE" href="/">Repos</a>
+            <a class="nav-tab NAV_FINDINGS_ACTIVE" href="/findings">Findings</a>
+        </div>
+'''
+
+REPOS_HTML = '''<!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
@@ -887,6 +894,13 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         }
         .logo-icon { height: 1.1em; width: auto; vertical-align: middle; }
         .subtitle { color: #888; margin-bottom: 30px; }
+        .nav-tabs { display: flex; gap: 8px; margin-bottom: 24px; }
+        .nav-tab {
+            color: #888; text-decoration: none; padding: 8px 16px; border-radius: 8px;
+            font-size: 0.9rem; font-weight: 600;
+        }
+        .nav-tab:hover { color: #ccc; }
+        .nav-tab.active { color: #fff; background: #1e3a5f; }
         .search-box {
             width: 100%;
             padding: 12px 16px;
@@ -966,13 +980,13 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             align-items: center;
             margin-bottom: 20px;
         }
-        .notify-section, .findings-section {
+        .notify-section {
             background: #0f0f1a;
             border-radius: 12px;
             padding: 20px;
             margin-top: 30px;
         }
-        .notify-section h2, .findings-section h2 {
+        .notify-section h2 {
             font-size: 1rem;
             text-transform: uppercase;
             letter-spacing: 0.05em;
@@ -1001,6 +1015,206 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         .text-input.visible { display: block; }
         .text-input:focus { outline: none; border-color: #4a9eff; }
         .field-hint { color: #666; font-size: 0.8rem; margin-top: 6px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="top-bar">
+            <h1><img src="/static/logo.png" alt="" class="logo-icon"> BaghGuard</h1>
+            <div class="user-badge">
+                <img src="USER_AVATAR" alt="">
+                <span>USER_NAME</span>
+                ADMIN_LINK
+                <a href="/logout">Sign out</a>
+            </div>
+        </div>
+        NAV_MARKUP
+        <p class="subtitle">Select repositories to scan for security vulnerabilities</p>
+
+        <input type="text" class="search-box" id="search" placeholder="Search repositories..." oninput="filterRepos()">
+
+        <div class="header-row">
+            <span id="selectedCount" class="selected-count">0 selected</span>
+        </div>
+
+        <div class="repo-list" id="repoList">
+            <!-- Repos will be inserted here -->
+        </div>
+
+        <div class="notify-section">
+            <h2>Notifications</h2>
+            <label class="check-row">
+                <input type="checkbox" id="slackEnabled" onchange="updateNotifyUI()">
+                Send alerts to Slack
+            </label>
+            <input type="text" class="text-input" id="slackWebhook" placeholder="https://hooks.slack.com/services/...">
+            <label class="check-row">
+                <input type="checkbox" id="emailEnabled" onchange="updateNotifyUI()">
+                Send alerts by email
+            </label>
+            <input type="text" class="text-input" id="emailTo" placeholder="you@example.com, teammate@example.com">
+            <div class="field-hint">Critical and high-severity findings only. Comma-separate multiple email addresses.</div>
+            <label class="check-row">
+                <input type="checkbox" id="remediateEnabled">
+                Open fix PRs automatically
+            </label>
+            <div class="field-hint">Critical/high findings with a known fix in a plain requirements.txt pin only. Opens a real PR on your repo using your GitHub login - review before merging.</div>
+        </div>
+
+        <button class="btn" id="saveBtn" onclick="saveSelection()">Save Selection</button>
+        <div class="status" id="status"></div>
+    </div>
+
+    <script>
+        const repos = REPOS_JSON;
+        const selected = SELECTED_JSON;
+        const notifySettings = NOTIFY_JSON;
+
+        function renderRepos(filter = '') {
+            const list = document.getElementById('repoList');
+            const filtered = repos.filter(r =>
+                r.name.toLowerCase().includes(filter.toLowerCase()) ||
+                (r.description && r.description.toLowerCase().includes(filter.toLowerCase()))
+            );
+
+            list.innerHTML = filtered.map(repo => {
+                const isSelected = selected.includes(repo.html_url);
+                return `
+                    <label class="repo-item ${isSelected ? 'selected' : ''}" data-url="${repo.html_url}">
+                        <input type="checkbox" ${isSelected ? 'checked' : ''} onchange="toggleRepo(this, '${repo.html_url}')">
+                        <div class="repo-info">
+                            <div class="repo-name">${repo.name}</div>
+                            ${repo.description ? `<div class="repo-desc">${repo.description}</div>` : ''}
+                            <div class="repo-meta">
+                                <span>${repo.language || 'Unknown'}</span>
+                                <span>${repo.stargazers_count} stars</span>
+                                <span>Updated ${new Date(repo.updated_at).toLocaleDateString()}</span>
+                            </div>
+                        </div>
+                    </label>
+                `;
+            }).join('');
+
+            updateCount();
+        }
+
+        function toggleRepo(checkbox, url) {
+            const item = checkbox.closest('.repo-item');
+            if (checkbox.checked) {
+                selected.push(url);
+                item.classList.add('selected');
+            } else {
+                const idx = selected.indexOf(url);
+                if (idx > -1) selected.splice(idx, 1);
+                item.classList.remove('selected');
+            }
+            updateCount();
+        }
+
+        function updateCount() {
+            document.getElementById('selectedCount').textContent = selected.length + ' selected';
+        }
+
+        function filterRepos() {
+            renderRepos(document.getElementById('search').value);
+        }
+
+        function updateNotifyUI() {
+            document.getElementById('slackWebhook').classList.toggle('visible', document.getElementById('slackEnabled').checked);
+            document.getElementById('emailTo').classList.toggle('visible', document.getElementById('emailEnabled').checked);
+        }
+
+        function initNotifySettings() {
+            document.getElementById('slackEnabled').checked = notifySettings.slack_enabled;
+            document.getElementById('slackWebhook').value = notifySettings.slack_webhook;
+            document.getElementById('emailEnabled').checked = notifySettings.email_enabled;
+            document.getElementById('emailTo').value = notifySettings.email_to.join(', ');
+            document.getElementById('remediateEnabled').checked = notifySettings.remediate_enabled;
+            updateNotifyUI();
+        }
+
+        function saveSelection() {
+            const btn = document.getElementById('saveBtn');
+            const status = document.getElementById('status');
+            btn.disabled = true;
+            btn.textContent = 'Saving...';
+
+            const notify = {
+                slack_enabled: document.getElementById('slackEnabled').checked,
+                slack_webhook: document.getElementById('slackWebhook').value.trim(),
+                email_enabled: document.getElementById('emailEnabled').checked,
+                email_to: document.getElementById('emailTo').value.split(',').map(s => s.trim()).filter(Boolean),
+                remediate_enabled: document.getElementById('remediateEnabled').checked
+            };
+
+            fetch('/save', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({repos: selected, notify: notify})
+            })
+            .then(r => r.json().then(data => ({ok: r.ok, data})))
+            .then(({ok, data}) => {
+                status.className = ok ? 'status success' : 'status error';
+                status.textContent = ok
+                    ? 'Saved! Scanners and alerters will use these settings on next run.'
+                    : 'Error: ' + data.error;
+                btn.textContent = 'Save Selection';
+                btn.disabled = false;
+            })
+            .catch(err => {
+                status.className = 'status error';
+                status.textContent = 'Error saving: ' + err;
+                btn.textContent = 'Save Selection';
+                btn.disabled = false;
+            });
+        }
+
+        renderRepos();
+        initNotifySettings();
+    </script>
+</body>
+</html>
+'''
+
+FINDINGS_HTML = '''<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>BaghGuard - Findings</title>
+    <link rel="icon" type="image/png" href="/static/logo.png">
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            color: #fff;
+            padding: 40px 20px;
+        }
+        .container { max-width: 1000px; margin: 0 auto; }
+        .top-bar {
+            display: flex; justify-content: space-between; align-items: center;
+            margin-bottom: 20px;
+        }
+        .user-badge { display: flex; align-items: center; gap: 10px; color: #ccc; font-size: 0.9rem; }
+        .user-badge img { width: 28px; height: 28px; border-radius: 50%; }
+        .user-badge a { color: #4a9eff; text-decoration: none; margin-left: 10px; }
+        h1 {
+            font-size: 2rem;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .logo-icon { height: 1.1em; width: auto; vertical-align: middle; }
+        .subtitle { color: #888; margin-bottom: 30px; }
+        .nav-tabs { display: flex; gap: 8px; margin-bottom: 24px; }
+        .nav-tab {
+            color: #888; text-decoration: none; padding: 8px 16px; border-radius: 8px;
+            font-size: 0.9rem; font-weight: 600;
+        }
+        .nav-tab:hover { color: #ccc; }
+        .nav-tab.active { color: #fff; background: #1e3a5f; }
 
         /* --- Open Issues dashboard ------------------------------------- */
         :root {
@@ -1014,6 +1228,19 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             --ink-muted:       #888;
         }
 
+        .findings-section {
+            background: #0f0f1a;
+            border-radius: 12px;
+            padding: 20px;
+        }
+        .findings-section h2 {
+            font-size: 1rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: #888;
+            margin-bottom: 16px;
+        }
+
         .stat-row {
             display: grid;
             grid-template-columns: repeat(5, 1fr);
@@ -1021,7 +1248,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             margin-bottom: 24px;
         }
         .stat-tile {
-            background: #0f0f1a;
+            background: #16162a;
             border-radius: 10px;
             padding: 14px 16px;
             border-left: 3px solid var(--tile-accent, #333);
@@ -1046,7 +1273,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             margin-bottom: 24px;
         }
         .chart-card {
-            background: #0f0f1a;
+            background: #16162a;
             border-radius: 12px;
             padding: 18px 20px;
         }
@@ -1158,41 +1385,10 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 <a href="/logout">Sign out</a>
             </div>
         </div>
-        <p class="subtitle">Select repositories to scan for security vulnerabilities</p>
-
-        <input type="text" class="search-box" id="search" placeholder="Search repositories..." oninput="filterRepos()">
-
-        <div class="header-row">
-            <span id="selectedCount" class="selected-count">0 selected</span>
-        </div>
-
-        <div class="repo-list" id="repoList">
-            <!-- Repos will be inserted here -->
-        </div>
-
-        <div class="notify-section">
-            <h2>Notifications</h2>
-            <label class="check-row">
-                <input type="checkbox" id="slackEnabled" onchange="updateNotifyUI()">
-                Send alerts to Slack
-            </label>
-            <input type="text" class="text-input" id="slackWebhook" placeholder="https://hooks.slack.com/services/...">
-            <label class="check-row">
-                <input type="checkbox" id="emailEnabled" onchange="updateNotifyUI()">
-                Send alerts by email
-            </label>
-            <input type="text" class="text-input" id="emailTo" placeholder="you@example.com, teammate@example.com">
-            <div class="field-hint">Critical and high-severity findings only. Comma-separate multiple email addresses.</div>
-            <label class="check-row">
-                <input type="checkbox" id="remediateEnabled">
-                Open fix PRs automatically
-            </label>
-            <div class="field-hint">Critical/high findings with a known fix in a plain requirements.txt pin only. Opens a real PR on your repo using your GitHub login - review before merging.</div>
-        </div>
+        NAV_MARKUP
+        <p class="subtitle">Vulnerabilities found across your scanned repositories</p>
 
         <div class="findings-section">
-            <h2>Open Issues</h2>
-
             <div class="stat-row" id="statRow"></div>
 
             <div class="chart-row">
@@ -1226,88 +1422,17 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         </div>
 
         <div class="chart-tooltip" id="chartTooltip"></div>
-
-        <button class="btn" id="saveBtn" onclick="saveSelection()">Save Selection</button>
-        <div class="status" id="status"></div>
     </div>
 
     <script>
-        const repos = REPOS_JSON;
-        const selected = SELECTED_JSON;
-        const notifySettings = NOTIFY_JSON;
         const findings = FINDINGS_JSON;
         const trend = TREND_JSON;
-
-        function renderRepos(filter = '') {
-            const list = document.getElementById('repoList');
-            const filtered = repos.filter(r =>
-                r.name.toLowerCase().includes(filter.toLowerCase()) ||
-                (r.description && r.description.toLowerCase().includes(filter.toLowerCase()))
-            );
-
-            list.innerHTML = filtered.map(repo => {
-                const isSelected = selected.includes(repo.html_url);
-                return `
-                    <label class="repo-item ${isSelected ? 'selected' : ''}" data-url="${repo.html_url}">
-                        <input type="checkbox" ${isSelected ? 'checked' : ''} onchange="toggleRepo(this, '${repo.html_url}')">
-                        <div class="repo-info">
-                            <div class="repo-name">${repo.name}</div>
-                            ${repo.description ? `<div class="repo-desc">${repo.description}</div>` : ''}
-                            <div class="repo-meta">
-                                <span>${repo.language || 'Unknown'}</span>
-                                <span>${repo.stargazers_count} stars</span>
-                                <span>Updated ${new Date(repo.updated_at).toLocaleDateString()}</span>
-                            </div>
-                        </div>
-                    </label>
-                `;
-            }).join('');
-
-            updateCount();
-        }
-
-        function toggleRepo(checkbox, url) {
-            const item = checkbox.closest('.repo-item');
-            if (checkbox.checked) {
-                selected.push(url);
-                item.classList.add('selected');
-            } else {
-                const idx = selected.indexOf(url);
-                if (idx > -1) selected.splice(idx, 1);
-                item.classList.remove('selected');
-            }
-            updateCount();
-        }
-
-        function updateCount() {
-            document.getElementById('selectedCount').textContent = selected.length + ' selected';
-        }
-
-        function filterRepos() {
-            renderRepos(document.getElementById('search').value);
-        }
-
-        function updateNotifyUI() {
-            document.getElementById('slackWebhook').classList.toggle('visible', document.getElementById('slackEnabled').checked);
-            document.getElementById('emailTo').classList.toggle('visible', document.getElementById('emailEnabled').checked);
-        }
-
-        function initNotifySettings() {
-            document.getElementById('slackEnabled').checked = notifySettings.slack_enabled;
-            document.getElementById('slackWebhook').value = notifySettings.slack_webhook;
-            document.getElementById('emailEnabled').checked = notifySettings.email_enabled;
-            document.getElementById('emailTo').value = notifySettings.email_to.join(', ');
-            document.getElementById('remediateEnabled').checked = notifySettings.remediate_enabled;
-            updateNotifyUI();
-        }
 
         function escapeHtml(s) {
             const div = document.createElement('div');
             div.textContent = s == null ? '' : String(s);
             return div.innerHTML;
         }
-
-        // --- Open Issues dashboard -------------------------------------------
 
         const SEVERITY_ORDER = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'];
         const SEVERITY_COLOR = {
@@ -1607,44 +1732,6 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             renderFindingsTable(sortFindings(filtered));
         }
 
-        function saveSelection() {
-            const btn = document.getElementById('saveBtn');
-            const status = document.getElementById('status');
-            btn.disabled = true;
-            btn.textContent = 'Saving...';
-
-            const notify = {
-                slack_enabled: document.getElementById('slackEnabled').checked,
-                slack_webhook: document.getElementById('slackWebhook').value.trim(),
-                email_enabled: document.getElementById('emailEnabled').checked,
-                email_to: document.getElementById('emailTo').value.split(',').map(s => s.trim()).filter(Boolean),
-                remediate_enabled: document.getElementById('remediateEnabled').checked
-            };
-
-            fetch('/save', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({repos: selected, notify: notify})
-            })
-            .then(r => r.json().then(data => ({ok: r.ok, data})))
-            .then(({ok, data}) => {
-                status.className = ok ? 'status success' : 'status error';
-                status.textContent = ok
-                    ? 'Saved! Scanners and alerters will use these settings on next run.'
-                    : 'Error: ' + data.error;
-                btn.textContent = 'Save Selection';
-                btn.disabled = false;
-            })
-            .catch(err => {
-                status.className = 'status error';
-                status.textContent = 'Error saving: ' + err;
-                btn.textContent = 'Save Selection';
-                btn.disabled = false;
-            });
-        }
-
-        renderRepos();
-        initNotifySettings();
         renderSevFilterChips();
         renderStatusFilterToggle();
         renderIssues();
@@ -1746,21 +1833,34 @@ class ConfigUIHandler(BaseHTTPRequestHandler):
             self.wfile.write(page.encode())
             return
 
-        repos = get_user_repos(user['access_token'])
-        selected = get_selected_repos(user['id'])
-        notify = get_notify_settings(user['id'])
-        findings = get_my_findings(user['id'])
-        trend = get_severity_trend(user['id'])
-
-        html = (HTML_TEMPLATE
-                .replace('REPOS_JSON', json.dumps(repos))
-                .replace('SELECTED_JSON', json.dumps(selected))
-                .replace('NOTIFY_JSON', json.dumps(notify))
-                .replace('FINDINGS_JSON', json.dumps(findings, default=str))
-                .replace('TREND_JSON', json.dumps(trend, default=str))
-                .replace('USER_AVATAR', user['avatar_url'] or '')
-                .replace('ADMIN_LINK', '<a href="/admin">Admin</a>' if is_admin else '')
-                .replace('USER_NAME', user['username']))
+        if self.path == '/findings':
+            findings = get_my_findings(user['id'])
+            trend = get_severity_trend(user['id'])
+            nav = (NAV_HTML
+                    .replace('NAV_REPOS_ACTIVE', '')
+                    .replace('NAV_FINDINGS_ACTIVE', 'active'))
+            html = (FINDINGS_HTML
+                    .replace('FINDINGS_JSON', json.dumps(findings, default=str))
+                    .replace('TREND_JSON', json.dumps(trend, default=str))
+                    .replace('NAV_MARKUP', nav)
+                    .replace('USER_AVATAR', user['avatar_url'] or '')
+                    .replace('ADMIN_LINK', '<a href="/admin">Admin</a>' if is_admin else '')
+                    .replace('USER_NAME', user['username']))
+        else:
+            repos = get_user_repos(user['access_token'])
+            selected = get_selected_repos(user['id'])
+            notify = get_notify_settings(user['id'])
+            nav = (NAV_HTML
+                    .replace('NAV_REPOS_ACTIVE', 'active')
+                    .replace('NAV_FINDINGS_ACTIVE', ''))
+            html = (REPOS_HTML
+                    .replace('REPOS_JSON', json.dumps(repos))
+                    .replace('SELECTED_JSON', json.dumps(selected))
+                    .replace('NOTIFY_JSON', json.dumps(notify))
+                    .replace('NAV_MARKUP', nav)
+                    .replace('USER_AVATAR', user['avatar_url'] or '')
+                    .replace('ADMIN_LINK', '<a href="/admin">Admin</a>' if is_admin else '')
+                    .replace('USER_NAME', user['username']))
 
         self.send_response(200)
         self.send_header('Content-Type', 'text/html; charset=utf-8')
