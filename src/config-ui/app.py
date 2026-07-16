@@ -415,6 +415,26 @@ def set_approval_status(user_id: str, status: str) -> dict:
         conn.close()
 
 
+def approve_all_pending() -> list:
+    """Approve every currently pending user in one statement. Returns each
+    affected {username, email} so callers can send the same per-user
+    approval email set_approval_status's single-user path sends."""
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                UPDATE users
+                SET approval_status = 'approved', approved_at = now()
+                WHERE approval_status = 'pending'
+                RETURNING username, email
+            """)
+            rows = [dict(row) for row in cur.fetchall()]
+            conn.commit()
+            return rows
+    finally:
+        conn.close()
+
+
 def request_approval_again(user_id: str) -> bool:
     """Move a rejected user back to 'pending' so they re-enter the waitlist
     queue. Scoped to rows currently 'rejected' - a no-op for users who are
@@ -727,6 +747,9 @@ ADMIN_HTML = '''<!DOCTYPE html>
         .btn { border: none; padding: 6px 14px; font-size: 0.8rem; font-weight: 600; border-radius: 6px; cursor: pointer; margin-right: 6px; }
         .btn-approve { background: #1e4620; color: #6ee06e; }
         .btn-reject { background: #4a1515; color: #ff6b6b; }
+        .btn-approve-all {
+            background: #1e4620; color: #6ee06e; padding: 10px 18px; margin-bottom: 14px;
+        }
         .btn-notify {
             background: #4a9eff; color: #fff; padding: 12px 24px; font-size: 15px; border-radius: 8px;
         }
@@ -785,6 +808,7 @@ ADMIN_HTML = '''<!DOCTYPE html>
                 return;
             }
             body.innerHTML = `
+                <button class="btn btn-approve-all" id="approveAllBtn" onclick="approveAll()">Approve all ${pending.length}</button>
                 <table>
                     <tr><th>User</th><th>Email</th><th>Requested</th><th></th></tr>
                     ${pending.map(u => `
@@ -821,6 +845,24 @@ ADMIN_HTML = '''<!DOCTYPE html>
                 }
             })
             .catch(err => alert('Error: ' + err));
+        }
+
+        function approveAll() {
+            if (!pending.length) return;
+            if (!confirm(`Approve all ${pending.length} pending user(s)? Each will get the approval email.`)) return;
+            const btn = document.getElementById('approveAllBtn');
+            btn.disabled = true;
+            fetch('/admin/approve-all', { method: 'POST' })
+                .then(r => r.json().then(data => ({ok: r.ok, data})))
+                .then(({ok, data}) => {
+                    if (!ok) { alert('Error: ' + data.error); btn.disabled = false; return; }
+                    const approvedEl = document.querySelector('.stat.approved .stat-num');
+                    approvedEl.textContent = Number(approvedEl.textContent) + data.count;
+                    pending.length = 0;
+                    renderPending();
+                    document.querySelector('.stat.pending .stat-num').textContent = 0;
+                })
+                .catch(err => { alert('Error: ' + err); btn.disabled = false; });
         }
 
         function renderNotify() {
@@ -2050,6 +2092,24 @@ class ConfigUIHandler(BaseHTTPRequestHandler):
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps({'status': 'ok'}).encode())
+            return
+
+        if self.path == '/admin/approve-all':
+            session_token = parse_cookie(self, SESSION_COOKIE)
+            user = get_session_user(session_token)
+            if not user or user['username'] not in ADMIN_GITHUB_USERNAMES:
+                self.send_error_json(403, "Admin access only")
+                return
+
+            approved = approve_all_pending()
+            for target in approved:
+                if target.get('email'):
+                    send_approval_email(target['email'], target['username'])
+
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'status': 'ok', 'count': len(approved)}).encode())
             return
 
         if self.path == '/admin/notify-waitlist':
