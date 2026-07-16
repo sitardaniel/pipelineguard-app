@@ -50,4 +50,55 @@ jobs:
           context: src/${{ matrix.service }}
           push: true
           platforms: linux/amd64,linux/arm64
-          tags: ghcr.io/${{ github.repository_owner }}/baghguard-${{ matrix.image_name || matrix.service }}:latest
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/baghguard-${{ matrix.image_name || matrix.service }}:latest
+            ghcr.io/${{ github.repository_owner }}/baghguard-${{ matrix.image_name || matrix.service }}:${{ github.sha }}
+
+  update-gitops-manifests:
+    name: Bump image tags in gitops repo
+    needs: build-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout gitops repo
+        uses: actions/checkout@v4
+        with:
+          repository: sitardaniel/pipelineguard-gitops
+          token: ${{ secrets.GITOPS_PUSH_TOKEN }}
+
+      - name: Set image tags to this commit's SHA
+        # Each apps/<service>/deployment.yaml pins its own image, e.g.
+        # ghcr.io/sitardaniel/baghguard-config-ui:latest - rewriting the
+        # tag here (instead of the workflow relying on :latest) means the
+        # manifest text actually changes on every push, so Argo CD's
+        # automated sync sees a real diff and rolls the Deployment out on
+        # its own. Before this, :latest never changed in git, so a synced
+        # Deployment could sit for days serving a stale pulled image until
+        # someone noticed and restarted it by hand.
+        run: |
+          set -euo pipefail
+          declare -A images=(
+            [config-ui]=baghguard-config-ui
+            [email-alerter]=baghguard-email-alerter
+            [normalizer]=baghguard-result-normalizer
+            [remediator]=baghguard-remediator
+            [slack-alerter]=baghguard-slack-alerter
+            [webhook-receiver]=baghguard-webhook-receiver
+          )
+          for service in "${!images[@]}"; do
+            image="${images[$service]}"
+            file="apps/${service}/deployment.yaml"
+            sed -i -E "s|(ghcr\.io/sitardaniel/${image}):[A-Za-z0-9_.-]+|\1:${{ github.sha }}|" "$file"
+          done
+
+      - name: Commit and push
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet; then
+            echo "No image tag changes, nothing to commit."
+            exit 0
+          fi
+          git add apps/*/deployment.yaml
+          git commit -m "Bump image tags to ${{ github.sha }}"
+          git push
