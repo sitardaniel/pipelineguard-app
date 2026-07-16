@@ -1001,6 +1001,20 @@ REPOS_HTML = '''<!DOCTYPE html>
             cursor: pointer;
         }
         .check-row input { width: 18px; height: 18px; cursor: pointer; }
+        .beta-tag {
+            display: inline-block;
+            background: rgba(74, 158, 255, 0.15);
+            color: #4a9eff;
+            border: 1px solid rgba(74, 158, 255, 0.4);
+            border-radius: 10px;
+            padding: 1px 8px;
+            font-size: 0.7rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+            margin-left: 8px;
+            vertical-align: middle;
+        }
         .text-input {
             width: 100%;
             padding: 10px 14px;
@@ -1057,6 +1071,7 @@ REPOS_HTML = '''<!DOCTYPE html>
             <label class="check-row">
                 <input type="checkbox" id="remediateEnabled">
                 Open fix PRs automatically
+                <span class="beta-tag">Beta</span>
             </label>
             <div class="field-hint">Critical/high findings with a known fix in a plain requirements.txt pin only. Opens a real PR on your repo using your GitHub login - review before merging.</div>
         </div>
