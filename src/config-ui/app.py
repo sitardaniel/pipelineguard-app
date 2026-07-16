@@ -1882,7 +1882,7 @@ class ConfigUIHandler(BaseHTTPRequestHandler):
                     .replace('STATUS_MESSAGE',
                              "Your request wasn't approved. You can ask for another review below."
                              if status == 'rejected'
-                             else "You'll be able to log in on Thursday, once an admin approves your account.")
+                             else "You'll be able to log in once an admin approves your account.")
                     .replace('REQUEST_AGAIN', request_again))
             self.send_response(200)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
