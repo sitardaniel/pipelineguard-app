@@ -171,7 +171,7 @@ def parse_cookie(handler, name: str):
 
 
 def set_cookie(handler, name: str, value: str, max_age: int = None):
-    parts = f"{name}={value}; HttpOnly; Path=/; SameSite=Lax"
+    parts = f"{name}={value}; HttpOnly; Path=/; SameSite=Lax; Secure"
     if max_age is not None:
         parts += f"; Max-Age={max_age}"
     handler.send_header('Set-Cookie', parts)
