@@ -922,3 +922,38 @@ wrong, for two different, genuinely interesting reasons:
   adopting this action elsewhere should pick their own threshold.
 
 ---
+
+## Wiring up the real push-triggered scan path
+
+### Goal
+The webhook receiver's HMAC validation and Job-triggering logic has
+existed since Day 9, but nothing on GitHub's side ever actually called it -
+zero webhooks were registered on any of the four repos. Push-triggered
+scanning only existed as dead code; what actually ran was the four
+CronJobs on their independent 6-hour schedule.
+
+### What was actually missing
+Two gaps, not one:
+1. `webhook-receiver`'s Service was ClusterIP-only - no Ingress existed
+   for it (`pipelineguard-gitops/apps/webhook-receiver/ingress.yaml`,
+   reusing `config-ui`'s already-issued TLS cert rather than requesting a
+   second one for the same host, plus a Traefik `stripPrefix` Middleware
+   so `/webhook/*` reaches the receiver's own `/`-relative path checks
+   correctly).
+2. The EC2 instance's security group only allowed port 443 from a single
+   IP (`176.229.31.250/32`) - port 80 was open to `0.0.0.0/0` for the
+   ACME HTTP-01 challenge, but it redirects to 443, which was blocked for
+   everyone else. This meant `baghguard.com` had effectively only ever
+   been reachable from that one location the whole time, including every
+   "it works" check run from that same network - opened 443 to
+   `0.0.0.0/0` to match 80.
+
+### Verification
+Registered a real webhook on `pipelineguard-app` (push events, HMAC
+secret matching the live `webhook-secret` on the cluster, not committed
+anywhere). First ping attempt failed - `"status":"failed to connect to
+host"`, `502` - which is what caught the security group gap, since a
+`curl` from this same session's shell had been succeeding the whole time
+without revealing it. Redelivered after opening the firewall: `200 OK`.
+
+---
