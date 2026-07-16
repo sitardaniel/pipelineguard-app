@@ -241,10 +241,35 @@ def process_file(filepath: str) -> list:
         return []
 
 
+def _dedup_key(f: dict) -> tuple:
+    """Must match idx_findings_dedup exactly (repo, scanner, file_path, cve_id,
+    package, description, line_number, all COALESCEd) - this is what ON CONFLICT
+    targets, so it's also what determines whether two findings collide."""
+    return (
+        f['repo'], f['scanner'],
+        f.get('file_path') or '', f.get('cve_id') or '',
+        f.get('package') or '', f.get('description') or '',
+        f.get('line_number') if f.get('line_number') is not None else -1,
+    )
+
+
 def insert_findings(findings: list):
     """Insert findings into PostgreSQL, attributing each to its owning user."""
     if not findings:
         return
+
+    # A single scan can report the same finding twice within one batch (e.g.
+    # Checkov firing the same check on two resources that happen to share a
+    # line_number, or any other scanner quirk) - ON CONFLICT DO UPDATE cannot
+    # affect the same row twice within one multi-row INSERT, so collapse
+    # same-key duplicates before they ever reach the database rather than
+    # letting the whole batch fail.
+    deduped = {}
+    for f in findings:
+        deduped[_dedup_key(f)] = f
+    if len(deduped) != len(findings):
+        logger.warning(f"Collapsed {len(findings) - len(deduped)} duplicate finding(s) within this batch")
+    findings = list(deduped.values())
 
     conn = get_db_connection()
     try:
@@ -283,7 +308,7 @@ def insert_findings(findings: list):
                 VALUES %s
                 ON CONFLICT (repo, scanner, COALESCE(file_path, ''),
                              COALESCE(cve_id, ''), COALESCE(package, ''),
-                             COALESCE(description, ''))
+                             COALESCE(description, ''), COALESCE(line_number, -1))
                 DO UPDATE SET scanned_at = now()
                 WHERE findings.status = 'open'
                 """,
